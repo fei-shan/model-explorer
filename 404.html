@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Model Exploration System</title>
+    <script>
+      // GitHub Pages SPA workaround: save the full path to sessionStorage
+      // then redirect to index.html so the React app can restore it.
+      sessionStorage.setItem('spa-redirect', location.pathname + location.search + location.hash);
+      window.location.replace('/model-explorer/');
+    </script>
+  </head>
+  <body></body>
+</html>
