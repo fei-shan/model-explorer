@@ -35,57 +35,35 @@ npm run preview     # serve the build locally at http://localhost:4173
 
 ### 2 — GitHub Pages
 
-The app is a static single-page application and can be deployed to GitHub Pages with one extra configuration step.
+The app is configured for GitHub Pages deployment out of the box.
 
-**Step 1 — Set the base path.**  
-In `vite.config.ts`, add the `base` field matching your repo name:
+**What's already set up in this repo:**
+- `vite.config.ts` — `base: '/model-explorer/'` is set.
+- `public/404.html` — handles SPA deep-link redirects so React Router keeps working after a hard refresh or direct URL load.
+- `.github/workflows/deploy.yml` — CI/CD pipeline that builds and pushes to the `gh-pages` branch on every push to `main`.
 
-```ts
-// vite.config.ts
-export default defineConfig({
-  plugins: [react()],
-  base: '/model-explorer/',   // replace with your repo name
-})
-```
+**One-time repository setup (do this once):**
 
-**Step 2 — Build and deploy.**  
-Using the [`gh-pages`](https://github.com/tschaub/gh-pages) package:
+1. Push the repo to GitHub (if not already done):
+   ```bash
+   git remote add origin https://github.com/fei-shan/model-explorer.git
+   git push -u origin main
+   ```
+
+2. Enable GitHub Pages in the repository:  
+   **Settings → Pages → Source → Deploy from a branch → `gh-pages` / `/ (root)`**
+
+3. After the next push to `main`, the Actions workflow runs automatically.  
+   The app will be live at **https://fei-shan.github.io/model-explorer/**.
+
+**Manual deploy (optional, without Actions):**
 
 ```bash
-npm install --save-dev gh-pages
-npm run build
-npx gh-pages -d dist
+npm install --save-dev gh-pages   # first time only
+npm run deploy                    # builds then publishes dist/ to gh-pages branch
 ```
 
-Or use the GitHub Actions workflow below — create `.github/workflows/deploy.yml`:
-
-```yaml
-name: Deploy to GitHub Pages
-on:
-  push:
-    branches: [main]
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - run: npm ci
-      - run: npm run build
-      - uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dist
-```
-
-**Step 3 — Enable Pages.**  
-In the repository → Settings → Pages, set the source to the `gh-pages` branch.
-
-The app will be live at `https://<your-username>.github.io/model-explorer/`.
-
-> **Note:** React Router uses client-side routing. GitHub Pages does not support fallback routing by default. Add a `404.html` that redirects to `index.html`, or switch the router to `HashRouter` in `src/App.tsx` for full compatibility.
+> **SPA routing note:** `public/404.html` saves the requested path to `sessionStorage` and redirects to the app root. A script in `index.html` restores the path before React Router initialises, making all deep links work transparently.
 
 ---
 
