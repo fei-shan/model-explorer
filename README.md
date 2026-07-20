@@ -67,57 +67,43 @@ npm run deploy                    # builds then publishes dist/ to gh-pages bran
 
 ---
 
-### 3 — Railway
+### 3 — Railway (Option A — Nixpacks, recommended)
 
-Railway can serve the built static files via a simple Node.js static server, or use a Nixpacks auto-detected build.
+This repo is ready for Railway deployment with zero additional config. The following files are already committed:
 
-**Option A — Nixpacks (recommended, zero config)**
+| File | Purpose |
+|---|---|
+| `railway.json` | Tells Railway to use Nixpacks and sets the start command |
+| `vite.config.ts` | Uses `VITE_BASE_PATH` env variable (defaults to `/`) so the build serves from the root on Railway |
+| `.github/workflows/deploy.yml` | Still sets `VITE_BASE_PATH=/model-explorer/` for the GitHub Pages build, so both deployments coexist |
 
-1. Push the repo to GitHub.
-2. In [Railway](https://railway.app), create a new project → **Deploy from GitHub repo**.
-3. Railway auto-detects Node.js and runs `npm run build`. Set the start command to serve the `dist/` folder:
+**Step-by-step: deploy to Railway**
 
-   In Railway → service settings → **Start Command**:
-   ```
-   npx serve dist
-   ```
-   Or add a `railway.json` at the repo root:
-   ```json
-   {
-     "build": { "builder": "NIXPACKS" },
-     "deploy": { "startCommand": "npx serve dist" }
-   }
+1. **Push this repo to GitHub** (if not already done):
+   ```bash
+   git remote add origin https://github.com/fei-shan/model-explorer.git
+   git push -u origin main
    ```
 
-4. Railway assigns a public URL automatically (e.g. `https://model-explorer-production.up.railway.app`).
+2. **Create a Railway account** at [railway.app](https://railway.app) and log in.
 
-**Option B — Custom static server**
+3. **New project → Deploy from GitHub repo:**
+   - Click **New Project** → **Deploy from GitHub repo**.
+   - Authorise Railway to access your GitHub account if prompted.
+   - Select **fei-shan/model-explorer** from the list.
 
-Add a minimal Express server at `server.js`:
+4. **Railway detects the config automatically** — `railway.json` is present so no manual settings are needed. Railway will:
+   - Detect Node.js via Nixpacks.
+   - Run `npm ci && npm run build` (producing `dist/`).
+   - Start the app with `npx serve -s dist` (`-s` enables SPA fallback so React Router deep links work).
 
-```js
-import express from 'express';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+5. **Generate a public domain:**
+   - In the service panel, go to **Settings → Networking → Generate Domain**.
+   - Railway assigns a URL like `https://model-explorer-production.up.railway.app`.
 
-const app  = express();
-const port = process.env.PORT || 3000;
-const dir  = join(dirname(fileURLToPath(import.meta.url)), 'dist');
+6. **All future pushes to `main`** redeploy automatically — no extra steps required.
 
-app.use(express.static(dir));
-app.get('*', (_, res) => res.sendFile(join(dir, 'index.html')));  // SPA fallback
-app.listen(port, () => console.log(`Listening on ${port}`));
-```
-
-Update `package.json`:
-
-```json
-"scripts": {
-  "start": "node server.js"
-}
-```
-
-Then deploy to Railway — it will run `npm run build` followed by `npm start`.
+> **No environment variables are required.** `VITE_BASE_PATH` intentionally has no value set in Railway, so it defaults to `'/'` (root). Do not set it in Railway's variable panel unless you have a custom subpath.
 
 ---
 
