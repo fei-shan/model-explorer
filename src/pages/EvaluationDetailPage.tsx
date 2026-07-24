@@ -6,8 +6,8 @@ import { useAppStore } from '../store/useAppStore';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
-import { MetricsPanel } from '../components/experiment/MetricsPanel';
-import { EntryResultTable } from '../components/experiment/EntryResultTable';
+import { MetricsPanel } from '../components/evaluation/MetricsPanel';
+import { EntryResultTable } from '../components/evaluation/EntryResultTable';
 
 function StatusIcon({ status }: { status: string }) {
   if (status === 'completed') return <CheckCircle2 size={14} className="text-emerald-500" />;
@@ -19,7 +19,7 @@ function StatusIcon({ status }: { status: string }) {
 const statusVariant = (s: string): 'success' | 'info' | 'danger' | 'muted' =>
   s === 'completed' ? 'success' : s === 'running' ? 'info' : s === 'failed' ? 'danger' : 'muted';
 
-export function EvaluationPage() {
+export function EvaluationDetailPage() {
   const { projectId, evaluationId } = useParams<{ projectId: string; evaluationId: string }>();
   const navigate = useNavigate();
   const {

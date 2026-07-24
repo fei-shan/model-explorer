@@ -4,13 +4,13 @@ import type {
   FlagInsight, EvaluationStatus, TrainingStatus, Entry,
   WeightSnapshot, TrainingEpoch, TrainingMetrics,
 } from '../types';
-import { USERS } from '../data/users';
-import { PROJECTS } from '../data/projects';
-import { DATASETS, TRAINING_DATASETS } from '../data/datasets';
-import { MODEL_SPECS } from '../data/modelSpecs';
-import { EVALUATIONS } from '../data/evaluations';
-import { TRAINING_RUNS } from '../data/trainingRuns';
-import { FLAGS } from '../data/flags';
+import { USERS } from '../mocks/users';
+import { PROJECTS } from '../mocks/projects';
+import { DATASETS, TRAINING_DATASETS } from '../mocks/datasets';
+import { MODEL_SPECS } from '../mocks/modelSpecs';
+import { EVALUATIONS } from '../mocks/evaluations';
+import { TRAINING_RUNS } from '../mocks/trainingRuns';
+import { FLAGS } from '../mocks/flags';
 
 interface AppState {
   currentUser: User | null;
