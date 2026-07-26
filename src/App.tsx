@@ -3,6 +3,7 @@ import { Layout } from './components/layout/Layout';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { DatasetListPage } from './pages/DatasetListPage';
+import { DatasetDetailPage } from './pages/DatasetDetailPage';
 import { ModelListPage } from './pages/ModelListPage';
 import { EvaluationListPage } from './pages/EvaluationListPage';
 import { TrainingListPage } from './pages/TrainingListPage';
@@ -20,6 +21,7 @@ export default function App() {
         <Route element={<Layout />}>
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/projects/:projectId/datasets"                            element={<DatasetListPage />} />
+          <Route path="/projects/:projectId/datasets/:datasetId"                 element={<DatasetDetailPage />} />
           <Route path="/projects/:projectId/models"                              element={<ModelListPage />} />
           <Route path="/projects/:projectId/models/:modelId"                    element={<ModelDetailPage />} />
           <Route path="/projects/:projectId/training"                            element={<TrainingListPage />} />
