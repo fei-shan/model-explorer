@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Edit2, Check, X, Flag } from 'lucide-react';
+import { ArrowLeft, Edit2, Check, X } from 'lucide-react';
+import { FlagCell } from '../components/review/FlagCell';
+import { FlagModal } from '../components/review/FlagModal';
 import clsx from 'clsx';
 import { useAppStore } from '../store/useAppStore';
 import { Badge, LabelBadge } from '../components/ui/Badge';
@@ -147,26 +149,11 @@ export function DatasetDetailPage() {
                       </td>
                     )}
                     <td className="px-3 py-2 whitespace-nowrap">
-                      {(() => {
-                        const entryFlags = flagsByEntry.get(entry.id) ?? [];
-                        const activeFlags = entryFlags.filter((f) => f.status !== 'dismissed');
-                        const alreadyFlagged = entryFlags.some((f) => f.raisedBy === currentUser?.id && f.status !== 'dismissed');
-                        return alreadyFlagged ? (
-                          <span className="flex items-center gap-1 text-amber-600">
-                            <Flag size={11} className="fill-amber-400" />
-                            <span className="text-[10px] font-medium">Flagged</span>
-                            {activeFlags.length > 1 && <span className="text-[10px] text-slate-400">+{activeFlags.length - 1}</span>}
-                          </span>
-                        ) : (
-                          <button
-                            className="p-1 rounded text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
-                            onClick={() => setFlagTarget(entry)}
-                            title="Flag this entry"
-                          >
-                            <Flag size={11} />
-                          </button>
-                        );
-                      })()}
+                      <FlagCell
+                        flags={flagsByEntry.get(entry.id) ?? []}
+                        currentUserId={currentUser?.id}
+                        onFlag={() => setFlagTarget(entry)}
+                      />
                     </td>
                     <td className="px-3 py-2">
                       <button
@@ -195,41 +182,19 @@ export function DatasetDetailPage() {
       )}
 
       {flagTarget && (
-        <Modal
-          title="Flag Entry for Review"
+        <FlagModal
+          summaryFields={[
+            { label: 'Subject', value: flagTarget.subjectId },
+            { label: 'Session', value: flagTarget.sessionId },
+            { label: 'Diagnosis', value: flagTarget.diagnosis },
+            { label: 'Age / Sex', value: `${flagTarget.age} / ${flagTarget.sex}` },
+          ]}
+          reason={flagReason}
+          onReasonChange={setFlagReason}
+          onSubmit={handleFlag}
           onClose={() => { setFlagTarget(null); setFlagReason(''); }}
-          footer={
-            <>
-              <Button variant="outline" size="sm" onClick={() => { setFlagTarget(null); setFlagReason(''); }}>
-                Cancel
-              </Button>
-              <Button variant="primary" size="sm" onClick={handleFlag} disabled={!flagReason.trim()}>
-                Submit Flag
-              </Button>
-            </>
-          }
-        >
-          <div className="space-y-4">
-            <div className="bg-slate-50 border border-slate-200 rounded p-3 text-xs space-y-1 font-mono">
-              <div><span className="text-slate-500">Subject:</span> {flagTarget.subjectId}</div>
-              <div><span className="text-slate-500">Session:</span> {flagTarget.sessionId}</div>
-              <div><span className="text-slate-500">Diagnosis:</span> {flagTarget.diagnosis}</div>
-              <div><span className="text-slate-500">Age / Sex:</span> {flagTarget.age} / {flagTarget.sex}</div>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Reason for flagging <span className="text-red-500">*</span>
-              </label>
-              <textarea
-                className="w-full border border-slate-300 rounded p-2.5 text-sm text-slate-700 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                rows={4}
-                placeholder="Describe why this entry warrants review (e.g., potential labelling error, data quality issue, unusual presentation)…"
-                value={flagReason}
-                onChange={(e) => setFlagReason(e.target.value)}
-              />
-            </div>
-          </div>
-        </Modal>
+          placeholder="Describe why this entry warrants review (e.g., potential labelling error, data quality issue, unusual presentation)…"
+        />
       )}
     </div>
   );

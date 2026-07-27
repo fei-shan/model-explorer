@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, PlayCircle, CheckCircle2, XCircle, Loader2, Clock, Link2 } from 'lucide-react';
+import { ArrowLeft, PlayCircle, CheckCircle2, XCircle, Loader2, Clock, Link2, SlidersHorizontal } from 'lucide-react';
 import { useAppStore, generateTrainingHistory } from '../store/useAppStore';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
+import { Modal } from '../components/ui/Modal';
 import { TrainingHistoryChart } from '../components/training/TrainingHistoryChart';
 
 function StatusIcon({ status }: { status: string }) {
@@ -23,7 +24,7 @@ export function TrainingDetailPage() {
   const {
     currentUser, getTrainingRunById, getProjectById,
     getModelSpecById, getDatasetById, getUserById,
-    setTrainingRunStatus, completeTrainingRun,
+    setTrainingRunStatus, completeTrainingRun, updateTrainingRunOverrides,
   } = useAppStore();
 
   const run     = getTrainingRunById(runId ?? '');
@@ -39,6 +40,9 @@ export function TrainingDetailPage() {
   const runner  = run ? getUserById(run.runBy) : undefined;
 
   const [isSimulating, setIsSimulating] = useState(false);
+  const [showEditParams, setShowEditParams] = useState(false);
+  const [paramsJson, setParamsJson] = useState('');
+  const [paramsError, setParamsError] = useState<string | null>(null);
 
   // Auto-advance to completed if status is 'running' (re-run simulation)
   useEffect(() => {
@@ -69,6 +73,39 @@ export function TrainingDetailPage() {
 
   const handleRerun = () => {
     setTrainingRunStatus(run.id, 'running');
+  };
+
+  const handleOpenEditParams = () => {
+    const effective = { ...baseParams, ...run.parameterOverrides };
+    setParamsJson(JSON.stringify(effective, null, 2));
+    setParamsError(null);
+    setShowEditParams(true);
+  };
+
+  const handleSaveParams = () => {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(paramsJson);
+    } catch {
+      setParamsError('Invalid JSON — please check the syntax.');
+      return;
+    }
+    // Validate values are primitives
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') {
+        setParamsError(`Value for "${k}" must be a string, number, or boolean.`);
+        return;
+      }
+    }
+    // Only store keys that differ from base
+    const overrides: Record<string, string | number | boolean> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (baseParams[k] === undefined || String(baseParams[k]) !== String(v)) {
+        overrides[k] = v as string | number | boolean;
+      }
+    }
+    updateTrainingRunOverrides(run.id, overrides);
+    setShowEditParams(false);
   };
 
   const trainCount = dataset?.entries.filter((e) => e.split === 'train').length ?? 0;
@@ -155,10 +192,17 @@ export function TrainingDetailPage() {
 
       {/* Parameters */}
       <Card>
-        <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-3">
-          Training Parameters
-          {hasOverrides && <span className="ml-2 text-amber-600 normal-case font-normal">(overrides applied)</span>}
-        </p>
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+            Training Parameters
+            {hasOverrides && <span className="ml-2 text-amber-600 normal-case font-normal">(overrides applied)</span>}
+          </p>
+          {currentUser?.role === 'researcher' && run.status !== 'running' && (
+            <Button variant="outline" size="sm" onClick={handleOpenEditParams}>
+              <SlidersHorizontal size={12} /> Edit Parameters
+            </Button>
+          )}
+        </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-2">
           {Object.entries(baseParams).map(([k, v]) => {
             const override = run.parameterOverrides[k];
@@ -206,6 +250,36 @@ export function TrainingDetailPage() {
             </Card>
           )}
         </>
+      )}
+
+      {/* Edit Parameters Modal */}
+      {showEditParams && (
+        <Modal
+          title="Edit Training Parameters"
+          onClose={() => setShowEditParams(false)}
+          width="max-w-xl"
+          footer={
+            <>
+              <Button variant="outline" size="sm" onClick={() => setShowEditParams(false)}>Cancel</Button>
+              <Button variant="primary" size="sm" onClick={handleSaveParams}>Save Overrides</Button>
+            </>
+          }
+        >
+          <div className="space-y-3">
+            <p className="text-xs text-slate-500">
+              Edit the effective parameters as JSON. Only values that differ from the model's base parameters will be stored as overrides.
+            </p>
+            <textarea
+              className="w-full h-64 font-mono text-xs border border-slate-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none"
+              value={paramsJson}
+              onChange={(e) => { setParamsJson(e.target.value); setParamsError(null); }}
+              spellCheck={false}
+            />
+            {paramsError && (
+              <p className="text-xs text-red-600 font-medium">{paramsError}</p>
+            )}
+          </div>
+        </Modal>
       )}
     </div>
   );

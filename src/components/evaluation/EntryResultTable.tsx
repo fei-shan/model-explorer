@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { Flag, CheckCircle, XCircle, AlertTriangle } from 'lucide-react';
+import { CheckCircle, XCircle, AlertTriangle } from 'lucide-react';
 import clsx from 'clsx';
 import type { EntryResult, AnyEntryResult, ClusteringEntryResult, LLMEntryResult, Flag as FlagType, ModelType } from '../../types';
 import { LabelBadge } from '../ui/Badge';
 import { Button } from '../ui/Button';
-import { Modal } from '../ui/Modal';
+import { FlagCell } from '../review/FlagCell';
+import { FlagModal } from '../review/FlagModal';
 import { useAppStore } from '../../store/useAppStore';
 
 interface Props {
@@ -100,8 +101,6 @@ function ClassificationTable({ results, evaluationId, showFull, onToggleFull, is
               {sorted.map((r) => {
                 const isMatch = r.predictedLabel === r.trueLabel;
                 const entryFlags = flagsByEntry.get(r.entryId) ?? [];
-                const activeFlags = entryFlags.filter((f) => f.status !== 'dismissed');
-                const alreadyFlagged = entryFlags.some((f) => f.raisedBy === currentUser?.id && f.status !== 'dismissed');
 
                 return (
                   <tr
@@ -133,17 +132,11 @@ function ClassificationTable({ results, evaluationId, showFull, onToggleFull, is
                         : <XCircle size={13} className="text-red-500 mx-auto" />}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      {alreadyFlagged ? (
-                        <span className="flex items-center gap-1 text-amber-600">
-                          <Flag size={11} className="fill-amber-400" />
-                          <span className="text-[10px] font-medium">Flagged</span>
-                          {activeFlags.length > 1 && <span className="text-[10px] text-slate-400">+{activeFlags.length - 1}</span>}
-                        </span>
-                      ) : (
-                        <Button variant="ghost" size="sm" onClick={() => setFlagTarget(r)}>
-                          <Flag size={11} />
-                        </Button>
-                      )}
+                      <FlagCell
+                        flags={entryFlags}
+                        currentUserId={currentUser?.id}
+                        onFlag={() => setFlagTarget(r)}
+                      />
                     </td>
                   </tr>
                 );
@@ -153,49 +146,22 @@ function ClassificationTable({ results, evaluationId, showFull, onToggleFull, is
         </div>
       )}
 
-      {/* Flag modal */}
       {flagTarget && (
-        <Modal
-          title="Flag Entry for Review"
+        <FlagModal
+          summaryFields={[
+            { label: 'Subject', value: flagTarget.subjectId },
+            { label: 'Session', value: flagTarget.sessionId },
+            { label: 'True label', value: flagTarget.trueLabel },
+            { label: 'Predicted', value: flagTarget.predictedLabel },
+            { label: 'Confidence', value: `${(flagTarget.confidence * 100).toFixed(0)}%` },
+          ]}
+          reason={flagReason}
+          onReasonChange={setFlagReason}
+          onSubmit={handleFlag}
           onClose={() => { setFlagTarget(null); setFlagReason(''); }}
-          footer={
-            <>
-              <Button variant="outline" size="sm" onClick={() => { setFlagTarget(null); setFlagReason(''); }}>
-                Cancel
-              </Button>
-              <Button variant="primary" size="sm" onClick={handleFlag} disabled={!flagReason.trim()}>
-                Submit Flag
-              </Button>
-            </>
-          }
-        >
-          <div className="space-y-4">
-            <div className="bg-slate-50 border border-slate-200 rounded p-3 text-xs space-y-1 font-mono">
-              <div><span className="text-slate-500">Subject:</span> {flagTarget.subjectId}</div>
-              <div><span className="text-slate-500">Session:</span> {flagTarget.sessionId}</div>
-              <div><span className="text-slate-500">True label:</span> {flagTarget.trueLabel}</div>
-              <div><span className="text-slate-500">Predicted:</span> {flagTarget.predictedLabel}</div>
-              <div><span className="text-slate-500">Confidence:</span> {(flagTarget.confidence * 100).toFixed(0)}%</div>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Reason for flagging <span className="text-red-500">*</span>
-              </label>
-              <textarea
-                className="w-full border border-slate-300 rounded p-2.5 text-sm text-slate-700 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                rows={4}
-                placeholder="Describe why this entry warrants review (e.g., unusual presentation, potential data quality issue, clinical significance of misclassification)…"
-                value={flagReason}
-                onChange={(e) => setFlagReason(e.target.value)}
-              />
-            </div>
-            {!isResearcher && (
-              <p className="text-[11px] text-slate-500 bg-teal-50 border border-teal-100 rounded p-2">
-                As a practitioner, you can flag entries based on clinical observations. The research team will review and respond.
-              </p>
-            )}
-          </div>
-        </Modal>
+          placeholder="Describe why this entry warrants review (e.g., unusual presentation, potential data quality issue, clinical significance of misclassification)…"
+          practitionerNote={!isResearcher ? 'As a practitioner, you can flag entries based on clinical observations. The research team will review and respond.' : undefined}
+        />
       )}
     </div>
   );
@@ -360,10 +326,6 @@ function LLMTable({
             <tbody>
               {results.map((r) => {
                 const entryFlags = flagsByEntry.get(r.entryId) ?? [];
-                const activeFlags = entryFlags.filter((f) => f.status !== 'dismissed');
-                const alreadyFlagged = entryFlags.some(
-                  (f) => f.raisedBy === currentUser?.id && f.status !== 'dismissed',
-                );
                 return (
                   <tr key={r.entryId} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
                     <td className="px-3 py-2 font-mono text-slate-700 whitespace-nowrap">{r.subjectId}</td>
@@ -373,19 +335,11 @@ function LLMTable({
                     <td className={`px-3 py-2 font-mono font-semibold ${scoreColor(r.rougeL)}`}>{r.rougeL.toFixed(3)}</td>
                     <td className={`px-3 py-2 font-mono font-semibold ${scoreColor(r.bleu)}`}>{r.bleu.toFixed(3)}</td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      {alreadyFlagged ? (
-                        <span className="flex items-center gap-1 text-amber-600">
-                          <Flag size={11} className="fill-amber-400" />
-                          <span className="text-[10px] font-medium">Flagged</span>
-                          {activeFlags.length > 1 && (
-                            <span className="text-[10px] text-slate-400">+{activeFlags.length - 1}</span>
-                          )}
-                        </span>
-                      ) : (
-                        <Button variant="ghost" size="sm" onClick={() => setFlagTarget(r)}>
-                          <Flag size={11} />
-                        </Button>
-                      )}
+                      <FlagCell
+                        flags={entryFlags}
+                        currentUserId={currentUser?.id}
+                        onFlag={() => setFlagTarget(r)}
+                      />
                     </td>
                   </tr>
                 );
@@ -396,46 +350,20 @@ function LLMTable({
       )}
 
       {flagTarget && (
-        <Modal
-          title="Flag Entry for Review"
+        <FlagModal
+          summaryFields={[
+            { label: 'Subject', value: flagTarget.subjectId },
+            { label: 'Session', value: flagTarget.sessionId },
+            { label: 'Prompt', value: truncate(flagTarget.prompt, 80) },
+            { label: 'Generated', value: truncate(flagTarget.generatedCompletion, 80) },
+          ]}
+          reason={flagReason}
+          onReasonChange={setFlagReason}
+          onSubmit={handleFlag}
           onClose={() => { setFlagTarget(null); setFlagReason(''); }}
-          footer={
-            <>
-              <Button variant="outline" size="sm" onClick={() => { setFlagTarget(null); setFlagReason(''); }}>
-                Cancel
-              </Button>
-              <Button variant="primary" size="sm" onClick={handleFlag} disabled={!flagReason.trim()}>
-                Submit Flag
-              </Button>
-            </>
-          }
-        >
-          <div className="space-y-4">
-            <div className="bg-slate-50 border border-slate-200 rounded p-3 text-xs space-y-1 font-mono">
-              <div><span className="text-slate-500">Subject:</span> {flagTarget.subjectId}</div>
-              <div><span className="text-slate-500">Session:</span> {flagTarget.sessionId}</div>
-              <div><span className="text-slate-500">Prompt:</span> {truncate(flagTarget.prompt, 80)}</div>
-              <div><span className="text-slate-500">Generated:</span> {truncate(flagTarget.generatedCompletion, 80)}</div>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Reason for flagging <span className="text-red-500">*</span>
-              </label>
-              <textarea
-                className="w-full border border-slate-300 rounded p-2.5 text-sm text-slate-700 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                rows={4}
-                placeholder="Describe why this generated output warrants review (e.g., factual error, missing critical finding, inappropriate clinical language)…"
-                value={flagReason}
-                onChange={(e) => setFlagReason(e.target.value)}
-              />
-            </div>
-            {!isResearcher && (
-              <p className="text-[11px] text-slate-500 bg-teal-50 border border-teal-100 rounded p-2">
-                As a practitioner, you can flag concerning model outputs. The research team will review and respond.
-              </p>
-            )}
-          </div>
-        </Modal>
+          placeholder="Describe why this generated output warrants review (e.g., factual error, missing critical finding, inappropriate clinical language)…"
+          practitionerNote={!isResearcher ? 'As a practitioner, you can flag concerning model outputs. The research team will review and respond.' : undefined}
+        />
       )}
     </div>
   );

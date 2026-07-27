@@ -38,6 +38,7 @@ interface AppState {
   addTrainingRun: (run: Omit<TrainingRun, 'id' | 'createdAt' | 'trainingHistory' | 'finalMetrics' | 'outputWeightsSnapshotId'>) => string;
   setTrainingRunStatus: (runId: string, status: TrainingStatus) => void;
   completeTrainingRun: (runId: string, history: TrainingEpoch[], metrics: TrainingMetrics, weightName: string) => void;
+  updateTrainingRunOverrides: (runId: string, overrides: Record<string, string | number | boolean>) => void;
 
   // Entry actions
   updateEntry: (datasetId: string, entryId: string, updates: Partial<Entry>) => void;
@@ -145,6 +146,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({
       trainingRuns: s.trainingRuns.map((r) =>
         r.id === runId ? { ...r, status } : r,
+      ),
+    }));
+  },
+
+  updateTrainingRunOverrides: (runId, overrides) => {
+    set((s) => ({
+      trainingRuns: s.trainingRuns.map((r) =>
+        r.id === runId ? { ...r, parameterOverrides: overrides } : r,
       ),
     }));
   },
