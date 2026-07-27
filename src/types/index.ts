@@ -67,7 +67,7 @@ export interface WeightSnapshot {
   sourceTrainingRunId?: string;
 }
 
-export type ModelType = 'classification' | 'regression' | 'detection' | 'segmentation';
+export type ModelType = 'classification' | 'regression' | 'detection' | 'segmentation' | 'clustering' | 'llm-finetuning';
 
 export interface ModelSpec {
   id: string;
@@ -94,13 +94,36 @@ export interface EntryResult {
   confidence: number;
 }
 
+export interface ClusteringEntryResult {
+  entryId: string;
+  subjectId: string;
+  sessionId: string;
+  clusterId: number;
+  distanceToCentroid: number;
+  silhouetteScore: number;
+}
+
+export interface LLMEntryResult {
+  entryId: string;
+  subjectId: string;
+  sessionId: string;
+  prompt: string;
+  referenceCompletion: string;
+  generatedCompletion: string;
+  rougeL: number;
+  bleu: number;
+}
+
+export type AnyEntryResult = EntryResult | ClusteringEntryResult | LLMEntryResult;
+
 export interface ConfusionMatrixData {
   labels: string[];
   matrix: number[][];
 }
 
 export interface EvaluationMetrics {
-  accuracy: number;
+  // classification / regression
+  accuracy?: number;
   auc?: number;
   f1?: number;
   sensitivity?: number;
@@ -109,6 +132,18 @@ export interface EvaluationMetrics {
   rmse?: number;
   mae?: number;
   r2?: number;
+  // clustering
+  silhouetteScore?: number;
+  daviesBouldinIndex?: number;
+  calinskiHarabaszIndex?: number;
+  numClusters?: number;
+  clusterSizes?: number[];
+  // llm-finetuning
+  perplexity?: number;
+  rougeL?: number;
+  bleu?: number;
+  bertScore?: number;
+  benchmarks?: Record<string, number>;
 }
 
 export interface Evaluation {
@@ -122,7 +157,7 @@ export interface Evaluation {
   createdAt: string;
   completedAt?: string;
   metrics: EvaluationMetrics;
-  entryResults: EntryResult[];
+  entryResults: AnyEntryResult[];
 }
 
 // ── Training Run ─────────────────────────────────────────────────────────────
@@ -171,11 +206,12 @@ export interface Flag {
   entryId: string;
   subjectId: string;
   sessionId: string;
-  evaluationId: string;
+  evaluationId?: string;
+  datasetId?: string;
   raisedBy: string;
   reason: string;
   status: FlagStatus;
-  insight?: FlagInsight;
+  insights: FlagInsight[];
   dismissedBy?: string;
   dismissedAt?: string;
   createdAt: string;

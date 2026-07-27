@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Plus } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
+import type { EntryResult } from '../types';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { Modal } from '../components/ui/Modal';
@@ -49,7 +50,10 @@ export function EvaluationListPage() {
               const weights  = model?.savedWeights.find((w) => w.id === ev.weightsSnapshotId);
               const dataset  = getDatasetById(ev.datasetId);
               const runner   = getUserById(ev.runBy);
-              const failures = ev.entryResults.filter((r) => r.predictedLabel !== r.trueLabel).length;
+              const mt       = model?.type;
+              const failures = ev.entryResults
+                .filter((r): r is EntryResult => 'predictedLabel' in r)
+                .filter((r) => r.predictedLabel !== r.trueLabel).length;
 
               return (
                 <button
@@ -73,10 +77,37 @@ export function EvaluationListPage() {
                     </div>
                     {ev.status === 'completed' && (
                       <div className="shrink-0 ml-4 text-right">
-                        <p className={`text-base font-bold font-mono ${ev.metrics.accuracy >= 0.85 ? 'text-emerald-600' : ev.metrics.accuracy >= 0.75 ? 'text-blue-600' : 'text-amber-600'}`}>
-                          {(ev.metrics.accuracy * 100).toFixed(1)}%
-                        </p>
-                        <p className="text-[10px] text-slate-400">{failures} failure{failures !== 1 ? 's' : ''}</p>
+                        {mt === 'clustering' ? (
+                          <>
+                            <p className={`text-base font-bold font-mono ${
+                              (ev.metrics.silhouetteScore ?? 0) >= 0.5 ? 'text-emerald-600' :
+                              (ev.metrics.silhouetteScore ?? 0) >= 0.25 ? 'text-blue-600' : 'text-amber-600'
+                            }`}>
+                              {ev.metrics.silhouetteScore?.toFixed(3) ?? '—'}
+                            </p>
+                            <p className="text-[10px] text-slate-400">{ev.metrics.numClusters ?? '?'} clusters · silhouette</p>
+                          </>
+                        ) : mt === 'llm-finetuning' ? (
+                          <>
+                            <p className={`text-base font-bold font-mono ${
+                              (ev.metrics.perplexity ?? 999) <= 10 ? 'text-emerald-600' :
+                              (ev.metrics.perplexity ?? 999) <= 25 ? 'text-blue-600' : 'text-amber-600'
+                            }`}>
+                              {ev.metrics.perplexity?.toFixed(1) ?? '—'}
+                            </p>
+                            <p className="text-[10px] text-slate-400">perplexity · ROUGE-L {ev.metrics.rougeL?.toFixed(3) ?? '—'}</p>
+                          </>
+                        ) : (
+                          <>
+                            <p className={`text-base font-bold font-mono ${
+                              (ev.metrics.accuracy ?? 0) >= 0.85 ? 'text-emerald-600' :
+                              (ev.metrics.accuracy ?? 0) >= 0.75 ? 'text-blue-600' : 'text-amber-600'
+                            }`}>
+                              {ev.metrics.accuracy !== undefined ? `${(ev.metrics.accuracy * 100).toFixed(1)}%` : '—'}
+                            </p>
+                            <p className="text-[10px] text-slate-400">{failures} failure{failures !== 1 ? 's' : ''}</p>
+                          </>
+                        )}
                       </div>
                     )}
                   </div>

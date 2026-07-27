@@ -21,6 +21,8 @@ export const MODEL_SPEC_IDS = {
   RESNET_BRAIN: 'ms-resnet-brain',
   BILSTM_ECG: 'ms-bilstm-ecg',
   BERT_NLP: 'ms-bert-nlp',
+  KMEANS_PATHOLOGY: 'ms-kmeans-pathology',
+  LLAMA_NOTES: 'ms-llama-notes',
 } as const;
 
 export const WEIGHT_IDS = {
@@ -28,6 +30,8 @@ export const WEIGHT_IDS = {
   RESNET_V2: 'w-resnet-v2',
   BILSTM_V1: 'w-bilstm-v1',
   BERT_V1: 'w-bert-v1',
+  KMEANS_V1: 'w-kmeans-v1',
+  LLAMA_V1: 'w-llama-v1',
 } as const;
 
 export const EVALUATION_IDS = {
@@ -35,6 +39,8 @@ export const EVALUATION_IDS = {
   BRAIN_EXP2: 'e-brain-2',
   ECG_EXP1: 'e-ecg-1',
   NLP_EXP1: 'e-nlp-1',
+  PATHOLOGY_CLUSTER1: 'e-pathology-cluster-1',
+  NOTES_LLM1: 'e-notes-llm-1',
 } as const;
 
 export const TRAINING_RUN_IDS = {

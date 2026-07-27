@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Flag, MessageSquare, XCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import clsx from 'clsx';
-import type { Flag as FlagType } from '../../types';
+import type { Flag as FlagType, EntryResult } from '../../types';
 import { useAppStore } from '../../store/useAppStore';
 import { Badge, LabelBadge } from '../ui/Badge';
 import { Button } from '../ui/Button';
@@ -28,17 +28,13 @@ export function FlagCard({ flag, experimentLabel }: Props) {
   const [expanded, setExpanded] = useState(flag.status !== 'dismissed');
 
   const raiser = getUserById(flag.raisedBy);
-  const insightAuthor = flag.insight ? getUserById(flag.insight.providedBy) : undefined;
-  const exp = getEvaluationById(flag.evaluationId);
+  const exp = flag.evaluationId ? getEvaluationById(flag.evaluationId) : undefined;
   const result = exp?.entryResults.find((r) => r.entryId === flag.entryId);
-  const dataset = exp ? getDatasetById(exp.datasetId) : undefined;
+  const classifResult = result && 'predictedLabel' in result ? (result as EntryResult) : undefined;
+  const dataset = exp ? getDatasetById(exp.datasetId) : flag.datasetId ? getDatasetById(flag.datasetId) : undefined;
 
-  const canAddInsight =
-    currentUser?.role === 'practitioner' && flag.status === 'open' && !flag.insight;
-  const canDismiss =
-    flag.status !== 'dismissed' &&
-    (currentUser?.role === 'researcher' ||
-      (currentUser?.role === 'practitioner' && flag.raisedBy === currentUser.id));
+  const canAddInsight = currentUser != null && flag.status !== 'dismissed';
+  const canDismiss = flag.status !== 'dismissed' && currentUser != null;
 
   const handleInsightSubmit = () => {
     if (!insightText.trim() || !currentUser) return;
@@ -70,11 +66,11 @@ export function FlagCard({ flag, experimentLabel }: Props) {
               <span className="text-xs font-semibold text-slate-700 font-mono">{flag.subjectId}</span>
               <span className="text-xs text-slate-400">/</span>
               <span className="text-xs text-slate-500 font-mono">{flag.sessionId}</span>
-              {result && (
+              {classifResult && (
                 <>
-                  <LabelBadge label={result.trueLabel} />
+                  <LabelBadge label={classifResult.trueLabel} />
                   <span className="text-[10px] text-slate-400">→</span>
-                  <LabelBadge label={result.predictedLabel} />
+                  <LabelBadge label={classifResult.predictedLabel} />
                 </>
               )}
             </div>
@@ -100,17 +96,23 @@ export function FlagCard({ flag, experimentLabel }: Props) {
             <p className="text-sm text-slate-700 leading-relaxed">{flag.reason}</p>
           </div>
 
-          {/* Existing insight */}
-          {flag.insight && (
-            <div className="bg-amber-50 border border-amber-100 rounded p-3">
-              <div className="flex items-center gap-1.5 mb-1.5">
-                <MessageSquare size={12} className="text-amber-600" />
-                <p className="text-[10px] font-semibold text-amber-700 uppercase tracking-wider">Clinical Insight</p>
-              </div>
-              <p className="text-sm text-slate-700 leading-relaxed">{flag.insight.comment}</p>
-              <p className="text-[10px] text-slate-400 mt-1.5">
-                {insightAuthor?.name ?? flag.insight.providedBy} · {formatDate(flag.insight.createdAt)}
-              </p>
+          {/* Discussion thread */}
+          {flag.insights.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Discussion</p>
+              {flag.insights.map((insight, idx) => {
+                const author = getUserById(insight.providedBy);
+                return (
+                  <div key={idx} className="bg-amber-50 border border-amber-100 rounded p-3">
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <MessageSquare size={12} className="text-amber-600" />
+                      <span className="text-xs font-semibold text-amber-700">{author?.name ?? insight.providedBy}</span>
+                      <span className="text-[10px] text-slate-400">· {formatDate(insight.createdAt)}</span>
+                    </div>
+                    <p className="text-sm text-slate-700 leading-relaxed">{insight.comment}</p>
+                  </div>
+                );
+              })}
             </div>
           )}
 
@@ -123,21 +125,21 @@ export function FlagCard({ flag, experimentLabel }: Props) {
             </div>
           )}
 
-          {/* Insight form */}
+          {/* Reply button */}
           {canAddInsight && !showInsightForm && (
             <Button variant="outline" size="sm" onClick={() => setShowInsightForm(true)}>
               <MessageSquare size={12} />
-              Add Clinical Insight
+              Reply
             </Button>
           )}
 
           {showInsightForm && (
             <div className="space-y-2 border border-amber-200 bg-amber-50 rounded p-3">
-              <p className="text-xs font-semibold text-amber-800">Add Clinical Insight</p>
+              <p className="text-xs font-semibold text-amber-800">Add Reply</p>
               <textarea
                 className="w-full border border-amber-200 bg-white rounded p-2.5 text-sm text-slate-700 resize-none focus:outline-none focus:ring-2 focus:ring-amber-400"
                 rows={4}
-                placeholder="Share domain knowledge on why this case was misclassified and its potential clinical impact…"
+                placeholder="Share your thoughts on this flag…"
                 value={insightText}
                 onChange={(e) => setInsightText(e.target.value)}
               />

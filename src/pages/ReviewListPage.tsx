@@ -58,7 +58,7 @@ export function ReviewListPage() {
       ) : (
         <div className="space-y-3">
           {filtered.map((flag) => {
-            const ev = getEvaluationById(flag.evaluationId);
+            const ev = flag.evaluationId ? getEvaluationById(flag.evaluationId) : undefined;
             return (
               <FlagCard key={flag.id} flag={flag} experimentLabel={ev?.id} />
             );

@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, PlayCircle, Clock, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAppStore } from '../store/useAppStore';
+import type { EntryResult } from '../types';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -53,7 +54,9 @@ export function EvaluationDetailPage() {
     }, 2500);
   };
 
-  const failures = evaluation.entryResults.filter((r) => r.predictedLabel !== r.trueLabel).length;
+  const failures = evaluation.entryResults
+    .filter((r): r is EntryResult => 'predictedLabel' in r)
+    .filter((r) => r.predictedLabel !== r.trueLabel).length;
   const total    = evaluation.entryResults.length;
 
   return (
@@ -89,10 +92,14 @@ export function EvaluationDetailPage() {
               <div>
                 <span className="text-slate-400">Entries</span><br />
                 <span className="text-slate-700">
-                  {total} total ·{' '}
-                  <span className={clsx(failures > 0 ? 'text-red-600' : 'text-emerald-600')}>
-                    {failures} failure{failures !== 1 ? 's' : ''}
-                  </span>
+                  {total} total
+                  {(model?.type === 'classification' || model?.type === 'regression' || !model?.type) && (
+                    <> ·{' '}
+                      <span className={clsx(failures > 0 ? 'text-red-600' : 'text-emerald-600')}>
+                        {failures} failure{failures !== 1 ? 's' : ''}
+                      </span>
+                    </>
+                  )}
                 </span>
               </div>
             </div>
@@ -111,7 +118,7 @@ export function EvaluationDetailPage() {
       {evaluation.status === 'completed' && (
         <Card>
           <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Evaluation Metrics</p>
-          <MetricsPanel metrics={evaluation.metrics} />
+          <MetricsPanel metrics={evaluation.metrics} modelType={model?.type ?? 'classification'} />
         </Card>
       )}
 
@@ -129,6 +136,7 @@ export function EvaluationDetailPage() {
         <Card>
           <EntryResultTable
             results={evaluation.entryResults}
+            modelType={model?.type ?? 'classification'}
             evaluationId={evaluation.id}
             showFull={showFull}
             onToggleFull={() => setShowFull((v) => !v)}

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Edit2, Check, X } from 'lucide-react';
+import { ArrowLeft, Edit2, Check, X, Flag } from 'lucide-react';
 import clsx from 'clsx';
 import { useAppStore } from '../store/useAppStore';
 import { Badge, LabelBadge } from '../components/ui/Badge';
@@ -8,18 +8,44 @@ import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { Modal } from '../components/ui/Modal';
 import { MedicalImagePlaceholder } from '../components/medical/MedicalImagePlaceholder';
-import type { Entry } from '../types';
+import type { Entry, Flag as FlagType } from '../types';
 
 export function DatasetDetailPage() {
   const { projectId, datasetId } = useParams<{ projectId: string; datasetId: string }>();
   const navigate = useNavigate();
-  const { getDatasetById, currentUser } = useAppStore();
+  const { getDatasetById, currentUser, addFlag, getFlagsForDataset } = useAppStore();
 
-  const [filter, setFilter]             = useState('');
-  const [selectedEntry, setSelectedEntry] = useState<Entry | null>(null);
+  const [filter, setFilter]               = useState('');
+  const [selectedEntry, setSelectedEntry]  = useState<Entry | null>(null);
+  const [flagTarget, setFlagTarget]        = useState<Entry | null>(null);
+  const [flagReason, setFlagReason]        = useState('');
 
   const ds = getDatasetById(datasetId ?? '');
   if (!ds) return <div className="text-sm text-slate-500 p-4">Dataset not found.</div>;
+
+  const dsFlags = getFlagsForDataset(ds.id);
+  const flagsByEntry = new Map<string, FlagType[]>();
+  dsFlags.forEach((f) => {
+    const arr = flagsByEntry.get(f.entryId) ?? [];
+    arr.push(f);
+    flagsByEntry.set(f.entryId, arr);
+  });
+
+  const handleFlag = () => {
+    if (!flagTarget || !currentUser || !flagReason.trim()) return;
+    addFlag({
+      entryId: flagTarget.id,
+      subjectId: flagTarget.subjectId,
+      sessionId: flagTarget.sessionId,
+      datasetId: ds.id,
+      raisedBy: currentUser.id,
+      reason: flagReason.trim(),
+      status: 'open',
+      insights: [],
+    });
+    setFlagTarget(null);
+    setFlagReason('');
+  };
 
   const trainCount = ds.entries.filter((e) => e.split === 'train').length;
   const valCount   = ds.entries.filter((e) => e.split === 'val').length;
@@ -30,7 +56,7 @@ export function DatasetDetailPage() {
       e.diagnosis.toLowerCase().includes(filter.toLowerCase()),
   );
 
-  const headers = ['Subject', 'Session', 'Date', 'Age', 'Sex', 'Diagnosis', 'Modality', ...(ds.role === 'training' ? ['Split'] : []), ''];
+  const headers = ['Subject', 'Session', 'Date', 'Age', 'Sex', 'Diagnosis', 'Modality', ...(ds.role === 'training' ? ['Split'] : []), 'Flags', ''];
 
   return (
     <div className="space-y-4">
@@ -120,10 +146,35 @@ export function DatasetDetailPage() {
                         </span>
                       </td>
                     )}
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {(() => {
+                        const entryFlags = flagsByEntry.get(entry.id) ?? [];
+                        const activeFlags = entryFlags.filter((f) => f.status !== 'dismissed');
+                        const alreadyFlagged = entryFlags.some((f) => f.raisedBy === currentUser?.id && f.status !== 'dismissed');
+                        return alreadyFlagged ? (
+                          <span className="flex items-center gap-1 text-amber-600">
+                            <Flag size={11} className="fill-amber-400" />
+                            <span className="text-[10px] font-medium">Flagged</span>
+                            {activeFlags.length > 1 && <span className="text-[10px] text-slate-400">+{activeFlags.length - 1}</span>}
+                          </span>
+                        ) : (
+                          <button
+                            className="p-1 rounded text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+                            onClick={() => setFlagTarget(entry)}
+                            title="Flag this entry"
+                          >
+                            <Flag size={11} />
+                          </button>
+                        );
+                      })()}
+                    </td>
                     <td className="px-3 py-2">
-                      <Button variant="ghost" size="sm" onClick={() => setSelectedEntry(entry)}>
+                      <button
+                        className="text-xs text-slate-500 hover:text-slate-800 px-2 py-1 rounded hover:bg-slate-100 transition-colors"
+                        onClick={() => setSelectedEntry(entry)}
+                      >
                         View
-                      </Button>
+                      </button>
                     </td>
                   </tr>
                 ))
@@ -141,6 +192,44 @@ export function DatasetDetailPage() {
           isResearcher={currentUser?.role === 'researcher'}
           onClose={() => setSelectedEntry(null)}
         />
+      )}
+
+      {flagTarget && (
+        <Modal
+          title="Flag Entry for Review"
+          onClose={() => { setFlagTarget(null); setFlagReason(''); }}
+          footer={
+            <>
+              <Button variant="outline" size="sm" onClick={() => { setFlagTarget(null); setFlagReason(''); }}>
+                Cancel
+              </Button>
+              <Button variant="primary" size="sm" onClick={handleFlag} disabled={!flagReason.trim()}>
+                Submit Flag
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-4">
+            <div className="bg-slate-50 border border-slate-200 rounded p-3 text-xs space-y-1 font-mono">
+              <div><span className="text-slate-500">Subject:</span> {flagTarget.subjectId}</div>
+              <div><span className="text-slate-500">Session:</span> {flagTarget.sessionId}</div>
+              <div><span className="text-slate-500">Diagnosis:</span> {flagTarget.diagnosis}</div>
+              <div><span className="text-slate-500">Age / Sex:</span> {flagTarget.age} / {flagTarget.sex}</div>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                Reason for flagging <span className="text-red-500">*</span>
+              </label>
+              <textarea
+                className="w-full border border-slate-300 rounded p-2.5 text-sm text-slate-700 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                rows={4}
+                placeholder="Describe why this entry warrants review (e.g., potential labelling error, data quality issue, unusual presentation)…"
+                value={flagReason}
+                onChange={(e) => setFlagReason(e.target.value)}
+              />
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );

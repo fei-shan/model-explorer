@@ -1,21 +1,30 @@
 import { useState } from 'react';
 import { Flag, CheckCircle, XCircle, AlertTriangle } from 'lucide-react';
 import clsx from 'clsx';
-import type { EntryResult, Flag as FlagType } from '../../types';
+import type { EntryResult, AnyEntryResult, ClusteringEntryResult, LLMEntryResult, Flag as FlagType, ModelType } from '../../types';
 import { LabelBadge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { Modal } from '../ui/Modal';
 import { useAppStore } from '../../store/useAppStore';
 
 interface Props {
-  results: EntryResult[];
+  results: AnyEntryResult[];
+  modelType: ModelType;
   evaluationId: string;
   showFull: boolean;
   onToggleFull: () => void;
   isResearcher: boolean;
 }
 
-export function EntryResultTable({ results, evaluationId, showFull, onToggleFull, isResearcher }: Props) {
+export function EntryResultTable({ results, modelType, evaluationId, showFull, onToggleFull, isResearcher }: Props) {
+  if (modelType === 'clustering')
+    return <ClusteringTable results={results as ClusteringEntryResult[]} showFull={showFull} onToggleFull={onToggleFull} />;
+  if (modelType === 'llm-finetuning')
+    return <LLMTable results={results as LLMEntryResult[]} evaluationId={evaluationId} showFull={showFull} onToggleFull={onToggleFull} isResearcher={isResearcher} />;
+  return <ClassificationTable results={results as EntryResult[]} evaluationId={evaluationId} showFull={showFull} onToggleFull={onToggleFull} isResearcher={isResearcher} />;
+}
+
+function ClassificationTable({ results, evaluationId, showFull, onToggleFull, isResearcher }: { results: EntryResult[]; evaluationId: string; showFull: boolean; onToggleFull: () => void; isResearcher: boolean }) {
   const { currentUser, addFlag, getFlagsForEvaluation } = useAppStore();
   const [flagTarget, setFlagTarget] = useState<EntryResult | null>(null);
   const [flagReason, setFlagReason] = useState('');
@@ -47,6 +56,7 @@ export function EntryResultTable({ results, evaluationId, showFull, onToggleFull
       raisedBy: currentUser.id,
       reason: flagReason.trim(),
       status: 'open',
+      insights: [],
     });
     setFlagTarget(null);
     setFlagReason('');
@@ -132,7 +142,6 @@ export function EntryResultTable({ results, evaluationId, showFull, onToggleFull
                       ) : (
                         <Button variant="ghost" size="sm" onClick={() => setFlagTarget(r)}>
                           <Flag size={11} />
-                          Flag
                         </Button>
                       )}
                     </td>
@@ -183,6 +192,246 @@ export function EntryResultTable({ results, evaluationId, showFull, onToggleFull
             {!isResearcher && (
               <p className="text-[11px] text-slate-500 bg-teal-50 border border-teal-100 rounded p-2">
                 As a practitioner, you can flag entries based on clinical observations. The research team will review and respond.
+              </p>
+            )}
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ── Clustering Table ───────────────────────────────────────────────────────────
+const CLUSTER_COLORS = [
+  'bg-blue-100 text-blue-700 border-blue-200',
+  'bg-emerald-100 text-emerald-700 border-emerald-200',
+  'bg-purple-100 text-purple-700 border-purple-200',
+  'bg-amber-100 text-amber-700 border-amber-200',
+  'bg-pink-100 text-pink-700 border-pink-200',
+  'bg-cyan-100 text-cyan-700 border-cyan-200',
+];
+
+function ClusteringTable({
+  results,
+  showFull,
+  onToggleFull,
+}: {
+  results: ClusteringEntryResult[];
+  showFull: boolean;
+  onToggleFull: () => void;
+}) {
+  const sorted = [...results].sort((a, b) => b.silhouetteScore - a.silhouetteScore);
+  const maxDist = Math.max(...results.map((r) => r.distanceToCentroid), 0.001);
+
+  const silColor = (s: number) =>
+    s >= 0.5 ? 'text-emerald-600' : s >= 0.25 ? 'text-blue-600' : s >= 0 ? 'text-amber-600' : 'text-red-600';
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-slate-700">Entry-Level Cluster Assignments</h3>
+        <Button variant="outline" size="sm" onClick={onToggleFull}>
+          {showFull ? 'Summary view' : 'Full results'}
+        </Button>
+      </div>
+
+      {!showFull ? (
+        <p className="text-sm text-slate-500 py-4 text-center border border-dashed border-slate-200 rounded-lg">
+          Full results hidden. Click <strong>Full results</strong> to view per-entry cluster assignments.
+        </p>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-slate-200">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-200 text-left">
+                {['Subject', 'Session', 'Cluster', 'Distance to Centroid', 'Silhouette Score'].map((h) => (
+                  <th key={h} className="px-3 py-2.5 font-semibold text-slate-500 uppercase tracking-wider text-[10px] whitespace-nowrap">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((r) => (
+                <tr key={r.entryId} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                  <td className="px-3 py-2 font-mono text-slate-700 whitespace-nowrap">{r.subjectId}</td>
+                  <td className="px-3 py-2 font-mono text-slate-500">{r.sessionId}</td>
+                  <td className="px-3 py-2">
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded border text-[11px] font-semibold ${CLUSTER_COLORS[r.clusterId % CLUSTER_COLORS.length]}`}>
+                      Cluster {r.clusterId}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-2">
+                      <div className="w-20 bg-slate-200 rounded-full h-1.5">
+                        <div
+                          className="h-1.5 rounded-full bg-indigo-400"
+                          style={{ width: `${(r.distanceToCentroid / maxDist) * 100}%` }}
+                        />
+                      </div>
+                      <span className="font-mono text-slate-600">{r.distanceToCentroid.toFixed(3)}</span>
+                    </div>
+                  </td>
+                  <td className={`px-3 py-2 font-mono font-semibold ${silColor(r.silhouetteScore)}`}>
+                    {r.silhouetteScore.toFixed(3)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── LLM Table ─────────────────────────────────────────────────────────────────
+function LLMTable({
+  results,
+  evaluationId,
+  showFull,
+  onToggleFull,
+  isResearcher,
+}: {
+  results: LLMEntryResult[];
+  evaluationId: string;
+  showFull: boolean;
+  onToggleFull: () => void;
+  isResearcher: boolean;
+}) {
+  const { currentUser, addFlag, getFlagsForEvaluation } = useAppStore();
+  const [flagTarget, setFlagTarget] = useState<LLMEntryResult | null>(null);
+  const [flagReason, setFlagReason] = useState('');
+
+  const flags = getFlagsForEvaluation(evaluationId);
+  const flagsByEntry = new Map<string, FlagType[]>();
+  flags.forEach((f) => {
+    const arr = flagsByEntry.get(f.entryId) ?? [];
+    arr.push(f);
+    flagsByEntry.set(f.entryId, arr);
+  });
+
+  const handleFlag = () => {
+    if (!flagTarget || !currentUser || !flagReason.trim()) return;
+    addFlag({
+      entryId: flagTarget.entryId,
+      subjectId: flagTarget.subjectId,
+      sessionId: flagTarget.sessionId,
+      evaluationId,
+      raisedBy: currentUser.id,
+      reason: flagReason.trim(),
+      status: 'open',
+      insights: [],
+    });
+    setFlagTarget(null);
+    setFlagReason('');
+  };
+
+  const scoreColor = (v: number) =>
+    v >= 0.6 ? 'text-emerald-600' : v >= 0.35 ? 'text-blue-600' : 'text-amber-600';
+
+  const truncate = (s: string, max = 60) => (s.length > max ? s.slice(0, max) + '…' : s);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-slate-700">Generation Results</h3>
+        <Button variant="outline" size="sm" onClick={onToggleFull}>
+          {showFull ? 'Summary view' : 'Full results'}
+        </Button>
+      </div>
+
+      {!showFull ? (
+        <p className="text-sm text-slate-500 py-4 text-center border border-dashed border-slate-200 rounded-lg">
+          Full results hidden. Click <strong>Full results</strong> to view per-entry generated text.
+        </p>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-slate-200">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-200 text-left">
+                {['Subject', 'Prompt', 'Reference', 'Generated', 'ROUGE-L', 'BLEU', 'Flags'].map((h) => (
+                  <th key={h} className="px-3 py-2.5 font-semibold text-slate-500 uppercase tracking-wider text-[10px] whitespace-nowrap">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {results.map((r) => {
+                const entryFlags = flagsByEntry.get(r.entryId) ?? [];
+                const activeFlags = entryFlags.filter((f) => f.status !== 'dismissed');
+                const alreadyFlagged = entryFlags.some(
+                  (f) => f.raisedBy === currentUser?.id && f.status !== 'dismissed',
+                );
+                return (
+                  <tr key={r.entryId} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                    <td className="px-3 py-2 font-mono text-slate-700 whitespace-nowrap">{r.subjectId}</td>
+                    <td className="px-3 py-2 text-slate-600 max-w-[140px]" title={r.prompt}>{truncate(r.prompt)}</td>
+                    <td className="px-3 py-2 text-slate-500 max-w-[140px]" title={r.referenceCompletion}>{truncate(r.referenceCompletion)}</td>
+                    <td className="px-3 py-2 text-slate-700 max-w-[160px]" title={r.generatedCompletion}>{truncate(r.generatedCompletion)}</td>
+                    <td className={`px-3 py-2 font-mono font-semibold ${scoreColor(r.rougeL)}`}>{r.rougeL.toFixed(3)}</td>
+                    <td className={`px-3 py-2 font-mono font-semibold ${scoreColor(r.bleu)}`}>{r.bleu.toFixed(3)}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {alreadyFlagged ? (
+                        <span className="flex items-center gap-1 text-amber-600">
+                          <Flag size={11} className="fill-amber-400" />
+                          <span className="text-[10px] font-medium">Flagged</span>
+                          {activeFlags.length > 1 && (
+                            <span className="text-[10px] text-slate-400">+{activeFlags.length - 1}</span>
+                          )}
+                        </span>
+                      ) : (
+                        <Button variant="ghost" size="sm" onClick={() => setFlagTarget(r)}>
+                          <Flag size={11} />
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {flagTarget && (
+        <Modal
+          title="Flag Entry for Review"
+          onClose={() => { setFlagTarget(null); setFlagReason(''); }}
+          footer={
+            <>
+              <Button variant="outline" size="sm" onClick={() => { setFlagTarget(null); setFlagReason(''); }}>
+                Cancel
+              </Button>
+              <Button variant="primary" size="sm" onClick={handleFlag} disabled={!flagReason.trim()}>
+                Submit Flag
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-4">
+            <div className="bg-slate-50 border border-slate-200 rounded p-3 text-xs space-y-1 font-mono">
+              <div><span className="text-slate-500">Subject:</span> {flagTarget.subjectId}</div>
+              <div><span className="text-slate-500">Session:</span> {flagTarget.sessionId}</div>
+              <div><span className="text-slate-500">Prompt:</span> {truncate(flagTarget.prompt, 80)}</div>
+              <div><span className="text-slate-500">Generated:</span> {truncate(flagTarget.generatedCompletion, 80)}</div>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                Reason for flagging <span className="text-red-500">*</span>
+              </label>
+              <textarea
+                className="w-full border border-slate-300 rounded p-2.5 text-sm text-slate-700 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                rows={4}
+                placeholder="Describe why this generated output warrants review (e.g., factual error, missing critical finding, inappropriate clinical language)…"
+                value={flagReason}
+                onChange={(e) => setFlagReason(e.target.value)}
+              />
+            </div>
+            {!isResearcher && (
+              <p className="text-[11px] text-slate-500 bg-teal-50 border border-teal-100 rounded p-2">
+                As a practitioner, you can flag concerning model outputs. The research team will review and respond.
               </p>
             )}
           </div>

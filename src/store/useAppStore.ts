@@ -51,6 +51,7 @@ interface AppState {
   getEvaluationById: (evaluationId: string) => Evaluation | undefined;
   getTrainingRunById: (runId: string) => TrainingRun | undefined;
   getFlagsForEvaluation: (evaluationId: string) => Flag[];
+  getFlagsForDataset: (datasetId: string) => Flag[];
   getFlagsForProject: (projectId: string) => Flag[];
 }
 
@@ -92,7 +93,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   addInsight: (flagId, insight) => {
     set((s) => ({
-      flags: s.flags.map((f) => f.id === flagId ? { ...f, status: 'commented' as const, insight } : f),
+      flags: s.flags.map((f) =>
+        f.id === flagId
+          ? { ...f, status: 'commented' as const, insights: [...f.insights, insight] }
+          : f,
+      ),
     }));
   },
   dismissFlag: (flagId) => {
@@ -193,10 +198,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   getEvaluationById: (evaluationId) => get().evaluations.find((e) => e.id === evaluationId),
   getTrainingRunById: (runId) => get().trainingRuns.find((r) => r.id === runId),
   getFlagsForEvaluation: (evaluationId) => get().flags.filter((f) => f.evaluationId === evaluationId),
+  getFlagsForDataset: (datasetId) => get().flags.filter((f) => f.datasetId === datasetId),
   getFlagsForProject: (projectId) => {
-    const { evaluations, flags } = get();
+    const { projects, evaluations, flags } = get();
+    const project = projects.find((p) => p.id === projectId);
     const evalIds = new Set(evaluations.filter((e) => e.projectId === projectId).map((e) => e.id));
-    return flags.filter((f) => evalIds.has(f.evaluationId));
+    const dsIds = new Set(project?.datasetIds ?? []);
+    return flags.filter((f) =>
+      (f.evaluationId && evalIds.has(f.evaluationId)) ||
+      (f.datasetId && dsIds.has(f.datasetId)),
+    );
   },
 }));
 

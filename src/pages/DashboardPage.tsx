@@ -89,8 +89,8 @@ export function DashboardPage() {
                   <div className="text-[10px] text-slate-400">
                     Latest eval: <span className="text-slate-600 font-mono">{latestEval.id}</span>
                   </div>
-                  <div className={`text-xs font-bold font-mono ${latestEval.metrics.accuracy >= 0.85 ? 'text-emerald-600' : latestEval.metrics.accuracy >= 0.75 ? 'text-blue-600' : 'text-amber-600'}`}>
-                    {(latestEval.metrics.accuracy * 100).toFixed(1)}% acc
+                  <div className={`text-xs font-bold font-mono ${(latestEval.metrics.accuracy ?? 0) >= 0.85 ? 'text-emerald-600' : (latestEval.metrics.accuracy ?? 0) >= 0.75 ? 'text-blue-600' : 'text-amber-600'}`}>
+                    {latestEval.metrics.accuracy !== undefined ? `${(latestEval.metrics.accuracy * 100).toFixed(1)}% acc` : `ppl ${latestEval.metrics.perplexity?.toFixed(1) ?? '—'}`}
                   </div>
                 </div>
               )}
