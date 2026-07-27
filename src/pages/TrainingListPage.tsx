@@ -20,6 +20,8 @@ export function TrainingListPage() {
   const [newRunModelId, setNewRunModelId]   = useState('');
   const [newRunWeightId, setNewRunWeightId] = useState('');
   const [newRunDatasetId, setNewRunDatasetId] = useState('');
+  const [newRunParamsJson, setNewRunParamsJson] = useState('');
+  const [newRunParamsError, setNewRunParamsError] = useState<string | null>(null);
 
   const project = getProjectById(projectId ?? '');
   if (!project) return null;
@@ -36,6 +38,28 @@ export function TrainingListPage() {
 
   const handleStartRun = () => {
     if (!newRunModelId || !newRunDatasetId || !currentUser) return;
+    let overrides: Record<string, string | number | boolean> = {};
+    if (newRunParamsJson.trim()) {
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(newRunParamsJson);
+      } catch {
+        setNewRunParamsError('Invalid JSON — please check the syntax.');
+        return;
+      }
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') {
+          setNewRunParamsError(`Value for "${k}" must be a string, number, or boolean.`);
+          return;
+        }
+      }
+      const base = selectedModel?.parameters ?? {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (base[k] === undefined || String(base[k]) !== String(v)) {
+          overrides[k] = v as string | number | boolean;
+        }
+      }
+    }
     const id = addTrainingRun({
       projectId: project.id,
       modelSpecId: newRunModelId,
@@ -43,7 +67,7 @@ export function TrainingListPage() {
       trainDatasetId: newRunDatasetId,
       runBy: currentUser.id,
       status: 'running',
-      parameterOverrides: {},
+      parameterOverrides: overrides,
     });
     setShowNewRun(false);
     navigate(`/projects/${project.id}/training/${id}`);
@@ -126,7 +150,13 @@ export function TrainingListPage() {
               <select
                 className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
                 value={newRunModelId}
-                onChange={(e) => { setNewRunModelId(e.target.value); setNewRunWeightId(''); }}
+                onChange={(e) => {
+                  const m = projectModels.find((m) => m?.id === e.target.value);
+                  setNewRunModelId(e.target.value);
+                  setNewRunWeightId('');
+                  setNewRunParamsJson(m ? JSON.stringify(m.parameters, null, 2) : '');
+                  setNewRunParamsError(null);
+                }}
               >
                 <option value="">Select a model…</option>
                 {projectModels.map((m) => m && <option key={m.id} value={m.id}>{m.name}</option>)}
@@ -164,15 +194,19 @@ export function TrainingListPage() {
             </div>
             {selectedModel && (
               <div>
-                <p className="text-xs font-semibold text-slate-700 mb-1.5">Parameters (from model spec)</p>
-                <div className="bg-slate-50 rounded p-2.5 grid grid-cols-2 gap-1">
-                  {Object.entries(selectedModel.parameters).map(([k, v]) => (
-                    <div key={k} className="flex gap-2 text-xs">
-                      <span className="text-slate-400 font-mono">{k}</span>
-                      <span className="text-slate-700 font-mono">{String(v)}</span>
-                    </div>
-                  ))}
-                </div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Parameter Overrides
+                  <span className="ml-1.5 font-normal text-slate-400">(edit values to override model defaults)</span>
+                </label>
+                <textarea
+                  className="w-full h-48 font-mono text-xs border border-slate-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none"
+                  value={newRunParamsJson}
+                  onChange={(e) => { setNewRunParamsJson(e.target.value); setNewRunParamsError(null); }}
+                  spellCheck={false}
+                />
+                {newRunParamsError && (
+                  <p className="text-xs text-red-600 font-medium mt-1">{newRunParamsError}</p>
+                )}
               </div>
             )}
           </div>
