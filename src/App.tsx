@@ -1,6 +1,8 @@
+import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Layout } from './components/layout/Layout';
 import { LoginPage } from './pages/LoginPage';
+import { useAppStore } from './store/useAppStore';
 import { DashboardPage } from './pages/DashboardPage';
 import { DatasetListPage } from './pages/DatasetListPage';
 import { DatasetDetailPage } from './pages/DatasetDetailPage';
@@ -14,6 +16,30 @@ import { TrainingDetailPage } from './pages/TrainingDetailPage';
 import { ModelDetailPage } from './pages/ModelDetailPage';
 
 export default function App() {
+  const isInitialized = useAppStore((s) => s.isInitialized);
+  const initError = useAppStore((s) => s.initError);
+  const initFromApi = useAppStore((s) => s.initFromApi);
+
+  useEffect(() => {
+    initFromApi();
+  }, [initFromApi]);
+
+  if (!isInitialized) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <p className="text-sm text-slate-400">Loading…</p>
+      </div>
+    );
+  }
+
+  if (initError) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <p className="text-sm text-red-400">Failed to load data from API: {initError}</p>
+      </div>
+    );
+  }
+
   return (
     <BrowserRouter>
       <Routes>

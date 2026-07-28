@@ -2,10 +2,13 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, PlayCircle, CheckCircle2, XCircle, Loader2, Clock, Link2 } from 'lucide-react';
 import { useAppStore, generateTrainingHistory } from '../store/useAppStore';
+import { USE_API } from '../services/config';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { TrainingHistoryChart } from '../components/training/TrainingHistoryChart';
+
+const POLL_INTERVAL_MS = 3000;
 
 function StatusIcon({ status }: { status: string }) {
   if (status === 'completed') return <CheckCircle2 size={14} className="text-emerald-500" />;
@@ -24,6 +27,7 @@ export function TrainingDetailPage() {
     currentUser, getTrainingRunById, getProjectById,
     getModelSpecById, getDatasetById, getUserById,
     setTrainingRunStatus, completeTrainingRun,
+    startTrainingRunApi, refreshTrainingRun,
   } = useAppStore();
 
   const run     = getTrainingRunById(runId ?? '');
@@ -39,9 +43,12 @@ export function TrainingDetailPage() {
   const runner  = run ? getUserById(run.runBy) : undefined;
 
   const [isSimulating, setIsSimulating] = useState(false);
+  const [isRerunning, setIsRerunning] = useState(false);
+  const [rerunError, setRerunError] = useState<string | null>(null);
 
-  // Auto-advance to completed if status is 'running' (re-run simulation)
+  // Demo mode only: fake completion 3s after status flips to 'running'.
   useEffect(() => {
+    if (USE_API) return;
     if (run?.status === 'running' && !isSimulating) {
       setIsSimulating(true);
       const timer = setTimeout(() => {
@@ -63,12 +70,41 @@ export function TrainingDetailPage() {
     }
   }, [run?.status]);
 
+  // Real backend: poll Firestore-backed status/trainingHistory while the
+  // Cloud Run Job is pending/running.
+  useEffect(() => {
+    if (!USE_API || !runId) return;
+    if (run?.status !== 'pending' && run?.status !== 'running') return;
+    const interval = setInterval(() => refreshTrainingRun(runId), POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [USE_API, runId, run?.status]);
+
   if (!run || !project) {
     return <div className="text-sm text-slate-500 p-4">Training run not found.</div>;
   }
 
-  const handleRerun = () => {
-    setTrainingRunStatus(run.id, 'running');
+  const handleRerun = async () => {
+    if (!USE_API) {
+      setTrainingRunStatus(run.id, 'running');
+      return;
+    }
+    if (!currentUser) return;
+    setIsRerunning(true);
+    setRerunError(null);
+    try {
+      const newRun = await startTrainingRunApi(project.id, {
+        modelSpecId: run.modelSpecId,
+        trainDatasetId: run.trainDatasetId,
+        baseWeightsSnapshotId: run.baseWeightsSnapshotId,
+        runBy: currentUser.id,
+        parameterOverrides: run.parameterOverrides,
+      });
+      navigate(`/projects/${project.id}/training/${newRun.id}`);
+    } catch (err) {
+      setRerunError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsRerunning(false);
+    }
   };
 
   const trainCount = dataset?.entries.filter((e) => e.split === 'train').length ?? 0;
@@ -133,22 +169,28 @@ export function TrainingDetailPage() {
             </div>
           </div>
 
-          {currentUser?.role === 'researcher' && run.status !== 'running' && (
-            <Button variant="primary" size="md" onClick={handleRerun} disabled={isSimulating}>
-              {isSimulating
-                ? <><Loader2 size={13} className="animate-spin" /> Running…</>
+          {currentUser?.role === 'researcher' && run.status !== 'running' && run.status !== 'pending' && (
+            <Button variant="primary" size="md" onClick={handleRerun} disabled={isSimulating || isRerunning}>
+              {isSimulating || isRerunning
+                ? <><Loader2 size={13} className="animate-spin" /> {USE_API ? 'Starting…' : 'Running…'}</>
                 : <><PlayCircle size={13} /> Re-run</>}
             </Button>
           )}
         </div>
       </div>
 
+      {rerunError && (
+        <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded p-2">{rerunError}</p>
+      )}
+
       {/* Running state */}
-      {run.status === 'running' && (
+      {(run.status === 'running' || run.status === 'pending') && (
         <Card>
           <div className="flex items-center gap-2 text-sm text-blue-600 py-6 justify-center">
             <Loader2 size={16} className="animate-spin" />
-            Training in progress… this will take a few seconds
+            {run.status === 'pending'
+              ? (USE_API ? 'Starting Cloud Run Job…' : 'Preparing…')
+              : (USE_API ? 'Training in progress on Cloud Run…' : 'Training in progress… this will take a few seconds')}
           </div>
         </Card>
       )}

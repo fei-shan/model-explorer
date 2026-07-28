@@ -3,12 +3,15 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, PlayCircle, Clock, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAppStore } from '../store/useAppStore';
+import { USE_API } from '../services/config';
 import type { EntryResult } from '../types';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { MetricsPanel } from '../components/evaluation/MetricsPanel';
 import { EntryResultTable } from '../components/evaluation/EntryResultTable';
+
+const POLL_INTERVAL_MS = 3000;
 
 function StatusIcon({ status }: { status: string }) {
   if (status === 'completed') return <CheckCircle2 size={14} className="text-emerald-500" />;
@@ -26,6 +29,7 @@ export function EvaluationDetailPage() {
   const {
     currentUser, getEvaluationById, getProjectById,
     getModelSpecById, getDatasetById, getUserById, setEvaluationStatus,
+    startEvaluationApi, refreshEvaluation,
   } = useAppStore();
 
   const evaluation = getEvaluationById(evaluationId ?? '');
@@ -38,20 +42,49 @@ export function EvaluationDetailPage() {
   const isResearcher = currentUser?.role === 'researcher';
   const [showFull, setShowFull] = useState(isResearcher);
   const [isRerunning, setIsRerunning] = useState(false);
+  const [rerunError, setRerunError] = useState<string | null>(null);
 
   useEffect(() => { setShowFull(isResearcher); }, [isResearcher]);
+
+  // Real backend: poll Firestore-backed status/metrics while the Cloud Run
+  // Job is pending/running.
+  useEffect(() => {
+    if (!USE_API || !evaluationId) return;
+    if (evaluation?.status !== 'pending' && evaluation?.status !== 'running') return;
+    const interval = setInterval(() => refreshEvaluation(evaluationId), POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [USE_API, evaluationId, evaluation?.status]);
 
   if (!evaluation || !project) {
     return <div className="text-sm text-slate-500 p-4">Evaluation not found.</div>;
   }
 
-  const handleRerun = () => {
+  const handleRerun = async () => {
+    if (!USE_API) {
+      setIsRerunning(true);
+      setEvaluationStatus(evaluation.id, 'running');
+      setTimeout(() => {
+        setEvaluationStatus(evaluation.id, 'completed');
+        setIsRerunning(false);
+      }, 2500);
+      return;
+    }
+    if (!currentUser) return;
     setIsRerunning(true);
-    setEvaluationStatus(evaluation.id, 'running');
-    setTimeout(() => {
-      setEvaluationStatus(evaluation.id, 'completed');
+    setRerunError(null);
+    try {
+      const newEval = await startEvaluationApi(project.id, {
+        modelSpecId: evaluation.modelSpecId,
+        weightsSnapshotId: evaluation.weightsSnapshotId,
+        datasetId: evaluation.datasetId,
+        runBy: currentUser.id,
+      });
+      navigate(`/projects/${project.id}/evaluations/${newEval.id}`);
+    } catch (err) {
+      setRerunError(err instanceof Error ? err.message : String(err));
+    } finally {
       setIsRerunning(false);
-    }, 2500);
+    }
   };
 
   const failures = evaluation.entryResults
@@ -105,14 +138,23 @@ export function EvaluationDetailPage() {
             </div>
           </div>
           {isResearcher && (
-            <Button variant="primary" size="md" onClick={handleRerun} disabled={isRerunning || evaluation.status === 'running'}>
+            <Button
+              variant="primary"
+              size="md"
+              onClick={handleRerun}
+              disabled={isRerunning || evaluation.status === 'running' || evaluation.status === 'pending'}
+            >
               {isRerunning
-                ? <><Loader2 size={13} className="animate-spin" /> Running…</>
+                ? <><Loader2 size={13} className="animate-spin" /> {USE_API ? 'Starting…' : 'Running…'}</>
                 : <><PlayCircle size={13} /> Re-run</>}
             </Button>
           )}
         </div>
       </div>
+
+      {rerunError && (
+        <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded p-2">{rerunError}</p>
+      )}
 
       {/* Metrics */}
       {evaluation.status === 'completed' && (
@@ -122,11 +164,13 @@ export function EvaluationDetailPage() {
         </Card>
       )}
 
-      {evaluation.status === 'running' && (
+      {(evaluation.status === 'running' || evaluation.status === 'pending') && (
         <Card>
           <div className="flex items-center gap-2 text-sm text-blue-600 py-4 justify-center">
             <Loader2 size={16} className="animate-spin" />
-            Running evaluation…
+            {evaluation.status === 'pending'
+              ? (USE_API ? 'Starting Cloud Run Job…' : 'Preparing…')
+              : (USE_API ? 'Running evaluation on Cloud Run…' : 'Running evaluation…')}
           </div>
         </Card>
       )}

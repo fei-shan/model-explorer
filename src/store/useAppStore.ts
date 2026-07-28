@@ -11,6 +11,8 @@ import { MODEL_SPECS } from '../mocks/modelSpecs';
 import { EVALUATIONS } from '../mocks/evaluations';
 import { TRAINING_RUNS } from '../mocks/trainingRuns';
 import { FLAGS } from '../mocks/flags';
+import { api, type StartTrainingRunInput, type StartEvaluationInput } from '../services/api';
+import { USE_API } from '../services/config';
 
 interface AppState {
   currentUser: User | null;
@@ -21,6 +23,11 @@ interface AppState {
   evaluations: Evaluation[];
   trainingRuns: TrainingRun[];
   flags: Flag[];
+  isInitialized: boolean;
+  initError: string | null;
+
+  // Bootstrap (only relevant when VITE_USE_API=true; no-op otherwise)
+  initFromApi: () => Promise<void>;
 
   // Auth
   login: (userId: string) => void;
@@ -38,6 +45,14 @@ interface AppState {
   addTrainingRun: (run: Omit<TrainingRun, 'id' | 'createdAt' | 'trainingHistory' | 'finalMetrics' | 'outputWeightsSnapshotId'>) => string;
   setTrainingRunStatus: (runId: string, status: TrainingStatus) => void;
   completeTrainingRun: (runId: string, history: TrainingEpoch[], metrics: TrainingMetrics, weightName: string) => void;
+
+  // Real-backend (VITE_USE_API) training/evaluation triggers - create a
+  // Firestore doc + fire the Cloud Run Job via the API, then poll for
+  // progress. See docs/data-pipeline.md §4-6.
+  startTrainingRunApi: (projectId: string, input: StartTrainingRunInput) => Promise<TrainingRun>;
+  refreshTrainingRun: (runId: string) => Promise<void>;
+  startEvaluationApi: (projectId: string, input: StartEvaluationInput) => Promise<Evaluation>;
+  refreshEvaluation: (evaluationId: string) => Promise<void>;
 
   // Entry actions
   updateEntry: (datasetId: string, entryId: string, updates: Partial<Entry>) => void;
@@ -71,13 +86,38 @@ function generateTrainingHistory(epochs: number, finalValAcc: number): TrainingE
 
 export const useAppStore = create<AppState>((set, get) => ({
   currentUser: null,
-  users: USERS,
-  projects: PROJECTS,
-  datasets: [...DATASETS, ...TRAINING_DATASETS],
-  modelSpecs: MODEL_SPECS,
-  evaluations: EVALUATIONS,
-  trainingRuns: TRAINING_RUNS,
-  flags: FLAGS,
+  users: USE_API ? [] : USERS,
+  projects: USE_API ? [] : PROJECTS,
+  datasets: USE_API ? [] : [...DATASETS, ...TRAINING_DATASETS],
+  modelSpecs: USE_API ? [] : MODEL_SPECS,
+  evaluations: USE_API ? [] : EVALUATIONS,
+  trainingRuns: USE_API ? [] : TRAINING_RUNS,
+  flags: USE_API ? [] : FLAGS,
+  isInitialized: !USE_API,
+  initError: null,
+
+  // ── Bootstrap ─────────────────────────────────────────────────────────────
+  initFromApi: async () => {
+    if (!USE_API) {
+      set({ isInitialized: true });
+      return;
+    }
+    try {
+      const [users, projects, datasets, modelSpecs, evaluations, trainingRuns, flags] =
+        await Promise.all([
+          api.users.list(),
+          api.projects.list(),
+          api.datasets.list(),
+          api.modelSpecs.list(),
+          api.evaluations.list(),
+          api.trainingRuns.list(),
+          api.flags.list(),
+        ]);
+      set({ users, projects, datasets, modelSpecs, evaluations, trainingRuns, flags, isInitialized: true });
+    } catch (err) {
+      set({ initError: err instanceof Error ? err.message : String(err), isInitialized: true });
+    }
+  },
 
   // ── Auth ──────────────────────────────────────────────────────────────────
   login: (userId) => {
@@ -172,6 +212,41 @@ export const useAppStore = create<AppState>((set, get) => ({
         m.id === run.modelSpecId ? { ...m, savedWeights: [...m.savedWeights, newSnapshot] } : m,
       ),
     }));
+  },
+
+  // ── Real-backend training/evaluation triggers ────────────────────────────
+  startTrainingRunApi: async (projectId, input) => {
+    const run = await api.projects.startTrainingRun(projectId, input);
+    set((s) => ({
+      trainingRuns: [...s.trainingRuns, run],
+      projects: s.projects.map((p) =>
+        p.id === projectId ? { ...p, trainingRunIds: [...p.trainingRunIds, run.id] } : p,
+      ),
+    }));
+    return run;
+  },
+
+  refreshTrainingRun: async (runId) => {
+    const run = await api.trainingRuns.get(runId);
+    set((s) => ({ trainingRuns: s.trainingRuns.map((r) => (r.id === runId ? run : r)) }));
+    const spec = await api.modelSpecs.get(run.modelSpecId);
+    set((s) => ({ modelSpecs: s.modelSpecs.map((m) => (m.id === spec.id ? spec : m)) }));
+  },
+
+  startEvaluationApi: async (projectId, input) => {
+    const evaluation = await api.projects.startEvaluation(projectId, input);
+    set((s) => ({
+      evaluations: [...s.evaluations, evaluation],
+      projects: s.projects.map((p) =>
+        p.id === projectId ? { ...p, evaluationIds: [...p.evaluationIds, evaluation.id] } : p,
+      ),
+    }));
+    return evaluation;
+  },
+
+  refreshEvaluation: async (evaluationId) => {
+    const evaluation = await api.evaluations.get(evaluationId);
+    set((s) => ({ evaluations: s.evaluations.map((e) => (e.id === evaluationId ? evaluation : e)) }));
   },
 
   // ── Entry actions ─────────────────────────────────────────────────────────

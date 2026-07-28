@@ -1,11 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, PlayCircle, CheckCircle2, XCircle, Loader2, Clock, Link2 } from 'lucide-react';
+import { Wand2 } from 'lucide-react';
 import { useAppStore, generateTrainingHistory } from '../store/useAppStore';
-import { Badge } from '../components/ui/Badge';
+import { USE_API } from '../services/config';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
-import { TrainingHistoryChart } from '../components/training/TrainingHistoryChart';
 
 import { Modal } from '../components/ui/Modal';
 import { Plus } from 'lucide-react';
@@ -15,13 +14,18 @@ import { ProjectHeader } from '../components/project/ProjectHeader';
 export function TrainingListPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
-  const { getProjectById, trainingRuns, getModelSpecById, getDatasetById, getUserById, datasets, currentUser, addTrainingRun, setTrainingRunStatus } = useAppStore();
+  const {
+    getProjectById, trainingRuns, getModelSpecById, getDatasetById, getUserById, datasets,
+    currentUser, addTrainingRun, setTrainingRunStatus, startTrainingRunApi,
+  } = useAppStore();
   const [showNewRun, setShowNewRun] = useState(false);
   const [newRunModelId, setNewRunModelId]   = useState('');
   const [newRunWeightId, setNewRunWeightId] = useState('');
   const [newRunDatasetId, setNewRunDatasetId] = useState('');
   const [newRunParamsJson, setNewRunParamsJson] = useState('');
   const [newRunParamsError, setNewRunParamsError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const project = getProjectById(projectId ?? '');
   if (!project) return null;
@@ -36,30 +40,71 @@ export function TrainingListPage() {
   const statusColor = (s: string) =>
     s === 'completed' ? 'text-emerald-600' : s === 'running' ? 'text-blue-500' : s === 'failed' ? 'text-red-500' : 'text-slate-400';
 
-  const handleStartRun = () => {
-    if (!newRunModelId || !newRunDatasetId || !currentUser) return;
-    let overrides: Record<string, string | number | boolean> = {};
-    if (newRunParamsJson.trim()) {
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(newRunParamsJson);
-      } catch {
-        setNewRunParamsError('Invalid JSON — please check the syntax.');
-        return;
-      }
-      for (const [k, v] of Object.entries(parsed)) {
-        if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') {
-          setNewRunParamsError(`Value for "${k}" must be a string, number, or boolean.`);
-          return;
-        }
-      }
-      const base = selectedModel?.parameters ?? {};
-      for (const [k, v] of Object.entries(parsed)) {
-        if (base[k] === undefined || String(base[k]) !== String(v)) {
-          overrides[k] = v as string | number | boolean;
-        }
+  /** Returns null (with setNewRunParamsError already called) on invalid JSON/value types. */
+  const parseOverrides = (): Record<string, string | number | boolean> | null => {
+    const overrides: Record<string, string | number | boolean> = {};
+    if (!newRunParamsJson.trim()) return overrides;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(newRunParamsJson);
+    } catch {
+      setNewRunParamsError('Invalid JSON — please check the syntax.');
+      return null;
+    }
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') {
+        setNewRunParamsError(`Value for "${k}" must be a string, number, or boolean.`);
+        return null;
       }
     }
+    const base = selectedModel?.parameters ?? {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (base[k] === undefined || String(base[k]) !== String(v)) {
+        overrides[k] = v as string | number | boolean;
+      }
+    }
+    return overrides;
+  };
+
+  const handleFillDemo = () => {
+    const model = projectModels[0];
+    const dataset = trainingDs[0];
+    if (model) {
+      setNewRunModelId(model.id);
+      setNewRunParamsJson(JSON.stringify(model.parameters, null, 2));
+    }
+    setNewRunWeightId('');
+    if (dataset) setNewRunDatasetId(dataset.id);
+    setNewRunParamsError(null);
+    setSubmitError(null);
+  };
+
+  const handleStartRun = async () => {
+    if (!newRunModelId || !newRunDatasetId || !currentUser) return;
+    const overrides = parseOverrides();
+    if (overrides === null) return;
+
+    if (USE_API) {
+      setIsSubmitting(true);
+      setSubmitError(null);
+      try {
+        const run = await startTrainingRunApi(project.id, {
+          modelSpecId: newRunModelId,
+          trainDatasetId: newRunDatasetId,
+          baseWeightsSnapshotId: newRunWeightId || undefined,
+          runBy: currentUser.id,
+          parameterOverrides: overrides,
+        });
+        setShowNewRun(false);
+        navigate(`/projects/${project.id}/training/${run.id}`);
+      } catch (err) {
+        setSubmitError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
     const id = addTrainingRun({
       projectId: project.id,
       modelSpecId: newRunModelId,
@@ -137,14 +182,26 @@ export function TrainingListPage() {
           onClose={() => setShowNewRun(false)}
           footer={
             <>
+              <Button variant="outline" size="sm" onClick={handleFillDemo} disabled={projectModels.length === 0}>
+                <Wand2 size={13} /> Fill Demo Data
+              </Button>
+              <div className="flex-1" />
               <Button variant="outline" size="sm" onClick={() => setShowNewRun(false)}>Cancel</Button>
-              <Button variant="primary" size="sm" onClick={handleStartRun} disabled={!newRunModelId || !newRunDatasetId}>
-                Start Training
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleStartRun}
+                disabled={!newRunModelId || !newRunDatasetId || isSubmitting}
+              >
+                {isSubmitting ? 'Starting…' : 'Start Training'}
               </Button>
             </>
           }
         >
           <div className="space-y-4">
+            {submitError && (
+              <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded p-2">{submitError}</p>
+            )}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">Model Specification</label>
               <select

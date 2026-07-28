@@ -1,0 +1,25 @@
+{
+  "name": "model-explorer-api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file=.env src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx --env-file=.env src/index.ts",
+    "seed": "tsx --env-file=.env src/scripts/seed.ts"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^7.11.0",
+    "@google-cloud/storage": "^7.21.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

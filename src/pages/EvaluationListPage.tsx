@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Plus } from 'lucide-react';
+import { Plus, Wand2 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
+import { USE_API } from '../services/config';
 import { Button } from '../components/ui/Button';
 import { EvalMetricsSummary } from '../components/evaluation/EvalMetricsSummary';
 import { Card } from '../components/ui/Card';
@@ -12,11 +13,13 @@ import { ProjectHeader } from '../components/project/ProjectHeader';
 export function EvaluationListPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
-  const { getProjectById, evaluations, modelSpecs, datasets, getModelSpecById, getDatasetById, getUserById } = useAppStore();
+  const { getProjectById, evaluations, datasets, getModelSpecById, getDatasetById, getUserById, currentUser, startEvaluationApi } = useAppStore();
   const [showNewEval, setShowNewEval] = useState(false);
   const [newEvalModelId, setNewEvalModelId] = useState('');
   const [newEvalWeightId, setNewEvalWeightId] = useState('');
   const [newEvalDatasetId, setNewEvalDatasetId] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const project = getProjectById(projectId ?? '');
   if (!project) return null;
@@ -30,6 +33,37 @@ export function EvaluationListPage() {
   const projectModels  = project.modelSpecIds.map((id) => getModelSpecById(id)).filter(Boolean);
   const selectedModel  = projectModels.find((m) => m?.id === newEvalModelId);
   const evalDatasets   = datasets.filter((d) => project.datasetIds.includes(d.id) && d.role === 'evaluation');
+
+  const handleFillDemo = () => {
+    const model = projectModels.find((m) => m && m.savedWeights.length > 0) ?? projectModels[0];
+    const dataset = evalDatasets[0];
+    if (model) {
+      setNewEvalModelId(model.id);
+      setNewEvalWeightId(model.savedWeights[model.savedWeights.length - 1]?.id ?? '');
+    }
+    if (dataset) setNewEvalDatasetId(dataset.id);
+    setSubmitError(null);
+  };
+
+  const handleStartEval = async () => {
+    if (!newEvalModelId || !newEvalWeightId || !newEvalDatasetId || !currentUser) return;
+    setIsSubmitting(true);
+    setSubmitError(null);
+    try {
+      const evaluation = await startEvaluationApi(project.id, {
+        modelSpecId: newEvalModelId,
+        weightsSnapshotId: newEvalWeightId,
+        datasetId: newEvalDatasetId,
+        runBy: currentUser.id,
+      });
+      setShowNewEval(false);
+      navigate(`/projects/${project.id}/evaluations/${evaluation.id}`);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -92,12 +126,26 @@ export function EvaluationListPage() {
           onClose={() => setShowNewEval(false)}
           footer={
             <>
+              <Button variant="outline" size="sm" onClick={handleFillDemo} disabled={projectModels.length === 0}>
+                <Wand2 size={13} /> Fill Demo Data
+              </Button>
+              <div className="flex-1" />
               <Button variant="outline" size="sm" onClick={() => setShowNewEval(false)}>Cancel</Button>
-              <Button variant="primary" size="sm" disabled>Run Evaluation (demo stub)</Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleStartEval}
+                disabled={!USE_API || !newEvalModelId || !newEvalWeightId || !newEvalDatasetId || isSubmitting}
+              >
+                {isSubmitting ? 'Starting…' : 'Run Evaluation'}
+              </Button>
             </>
           }
         >
           <div className="space-y-4">
+            {submitError && (
+              <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded p-2">{submitError}</p>
+            )}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">Model Specification</label>
               <select
@@ -134,9 +182,12 @@ export function EvaluationListPage() {
                 ))}
               </select>
             </div>
-            <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-100 rounded p-2">
-              Evaluation execution is a demo stub and will not persist.
-            </p>
+            {!USE_API && (
+              <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-100 rounded p-2">
+                Evaluation execution requires the real backend (VITE_USE_API=true) — this demo/mock mode doesn't
+                simulate evaluation runs.
+              </p>
+            )}
           </div>
         </Modal>
       )}
