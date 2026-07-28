@@ -1,4 +1,5 @@
 import type { AnyEntryResult, EntryResult, EvaluationMetrics, ModelType } from '../../types';
+import { isEntryResultCorrect } from '../../utils/entryResults';
 
 interface Props {
   metrics: EvaluationMetrics;
@@ -39,7 +40,23 @@ export function EvalMetricsSummary({ metrics, modelType, entryResults }: Props) 
     );
   }
 
-  // classification / regression (default)
+  if (modelType === 'regression') {
+    const r2 = metrics.r2 ?? 0;
+    const color =
+      r2 >= 0.85 ? 'text-emerald-600' :
+      r2 >= 0.6 ? 'text-blue-600' :
+      'text-amber-600';
+    return (
+      <div className="shrink-0 ml-4 text-right">
+        <p className={`text-base font-bold font-mono ${color}`}>
+          {metrics.r2 !== undefined ? metrics.r2.toFixed(3) : '—'}
+        </p>
+        <p className="text-[10px] text-slate-400">R² · RMSE {metrics.rmse?.toFixed(3) ?? '—'}</p>
+      </div>
+    );
+  }
+
+  // classification (default)
   const acc = metrics.accuracy ?? 0;
   const color =
     acc >= 0.85 ? 'text-emerald-600' :
@@ -47,7 +64,7 @@ export function EvalMetricsSummary({ metrics, modelType, entryResults }: Props) 
     'text-amber-600';
   const failures = entryResults
     .filter((r): r is EntryResult => 'predictedLabel' in r)
-    .filter((r) => r.predictedLabel !== r.trueLabel).length;
+    .filter((r) => !isEntryResultCorrect(r, modelType)).length;
 
   return (
     <div className="shrink-0 ml-4 text-right">

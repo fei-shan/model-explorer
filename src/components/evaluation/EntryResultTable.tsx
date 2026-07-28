@@ -7,6 +7,7 @@ import { Button } from '../ui/Button';
 import { FlagCell } from '../review/FlagCell';
 import { FlagModal } from '../review/FlagModal';
 import { useAppStore } from '../../store/useAppStore';
+import { isEntryResultCorrect } from '../../utils/entryResults';
 
 interface Props {
   results: AnyEntryResult[];
@@ -22,10 +23,10 @@ export function EntryResultTable({ results, modelType, evaluationId, showFull, o
     return <ClusteringTable results={results as ClusteringEntryResult[]} showFull={showFull} onToggleFull={onToggleFull} />;
   if (modelType === 'llm-finetuning')
     return <LLMTable results={results as LLMEntryResult[]} evaluationId={evaluationId} showFull={showFull} onToggleFull={onToggleFull} isResearcher={isResearcher} />;
-  return <ClassificationTable results={results as EntryResult[]} evaluationId={evaluationId} showFull={showFull} onToggleFull={onToggleFull} isResearcher={isResearcher} />;
+  return <ClassificationTable results={results as EntryResult[]} modelType={modelType} evaluationId={evaluationId} showFull={showFull} onToggleFull={onToggleFull} isResearcher={isResearcher} />;
 }
 
-function ClassificationTable({ results, evaluationId, showFull, onToggleFull, isResearcher }: { results: EntryResult[]; evaluationId: string; showFull: boolean; onToggleFull: () => void; isResearcher: boolean }) {
+function ClassificationTable({ results, modelType, evaluationId, showFull, onToggleFull, isResearcher }: { results: EntryResult[]; modelType: ModelType; evaluationId: string; showFull: boolean; onToggleFull: () => void; isResearcher: boolean }) {
   const { currentUser, addFlag, getFlagsForEvaluation } = useAppStore();
   const [flagTarget, setFlagTarget] = useState<EntryResult | null>(null);
   const [flagReason, setFlagReason] = useState('');
@@ -40,12 +41,12 @@ function ClassificationTable({ results, evaluationId, showFull, onToggleFull, is
 
   // Sort: failures first, then by subjectId
   const sorted = [...results].sort((a, b) => {
-    const aFail = a.predictedLabel !== a.trueLabel ? 0 : 1;
-    const bFail = b.predictedLabel !== b.trueLabel ? 0 : 1;
+    const aFail = isEntryResultCorrect(a, modelType) ? 1 : 0;
+    const bFail = isEntryResultCorrect(b, modelType) ? 1 : 0;
     return aFail - bFail || a.subjectId.localeCompare(b.subjectId);
   });
 
-  const failures = results.filter((r) => r.predictedLabel !== r.trueLabel).length;
+  const failures = results.filter((r) => !isEntryResultCorrect(r, modelType)).length;
 
   const handleFlag = () => {
     if (!flagTarget || !currentUser || !flagReason.trim()) return;
@@ -99,7 +100,7 @@ function ClassificationTable({ results, evaluationId, showFull, onToggleFull, is
             </thead>
             <tbody>
               {sorted.map((r) => {
-                const isMatch = r.predictedLabel === r.trueLabel;
+                const isMatch = isEntryResultCorrect(r, modelType);
                 const entryFlags = flagsByEntry.get(r.entryId) ?? [];
 
                 return (

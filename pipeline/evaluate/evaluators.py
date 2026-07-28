@@ -1,14 +1,17 @@
 """
 Task-type -> evaluator registry, mirroring pipeline/train/models.py's
-pattern. Only 'classification' is implemented, matching the only
-ModelSpec.type the two seeded toy datasets use; regression/clustering/
+pattern. 'classification' and 'regression' are implemented; clustering/
 detection/segmentation/llm-finetuning are deferred (see
 docs/data-pipeline.md §7) and would each produce a different
 AnyEntryResult shape (ClusteringEntryResult, LLMEntryResult, ...), not just
 a different model.
+
+Every evaluator shares the (model, label_encoder, entries, X, y_true)
+signature even though regression doesn't use label_encoder - keeping one
+call shape in evaluate.py is simpler than branching there per task type.
 """
 
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, mean_absolute_error, r2_score, roc_auc_score, root_mean_squared_error
 
 # Every ModelSpec.type the app's type system allows (src/types/index.ts
 # ModelType) - see pipeline/train/models.py's ALL_MODEL_TYPES for the same
@@ -53,8 +56,37 @@ def evaluate_classifier(model, label_encoder, entries, X, y_true):
     return entry_results, metrics
 
 
+def evaluate_regressor(model, _label_encoder, entries, X, y_true):
+    y_pred = model.predict(X)
+
+    entry_results = []
+    for i, entry in enumerate(entries):
+        error = abs(float(y_pred[i]) - float(y_true[i]))
+        entry_results.append(
+            {
+                "entryId": entry["id"],
+                "subjectId": entry["subjectId"],
+                "sessionId": entry["sessionId"],
+                "predictedLabel": str(round(float(y_pred[i]), 4)),
+                "trueLabel": str(round(float(y_true[i]), 4)),
+                # Target lives in [0, 1] (ink coverage), so 1 - error is a
+                # reasonable "closeness" stand-in for the confidence field -
+                # not a real probability, regression has no such thing.
+                "confidence": round(max(0.0, 1.0 - error), 4),
+            }
+        )
+
+    metrics = {
+        "rmse": round(float(root_mean_squared_error(y_true, y_pred)), 4),
+        "mae": round(float(mean_absolute_error(y_true, y_pred)), 4),
+        "r2": round(float(r2_score(y_true, y_pred)), 4),
+    }
+    return entry_results, metrics
+
+
 EVALUATORS = {
     "classification": evaluate_classifier,
+    "regression": evaluate_regressor,
 }
 
 

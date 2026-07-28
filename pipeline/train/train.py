@@ -1,5 +1,5 @@
 """
-Phase 3 training job, per docs/data-pipeline.md §4. Runs both locally
+Phase 3 training job, per docs/data-pipeline.md §4-5. Runs both locally
 (python3 train.py --run-id ...) and as the Cloud Run Job container
 (TRAINING_RUN_ID env var) - identical logic either way, only the run-id
 source differs.
@@ -10,6 +10,13 @@ registry (loaders.py) -> train via the task-type registry (models.py) one
 epoch at a time, writing trainingHistory back to Firestore after each epoch
 -> on completion, save weights to the artifacts bucket and set
 finalMetrics/outputWeightsSnapshotId/status on the TrainingRun doc.
+
+Classification and regression diverge enough (loss function, partial_fit
+signature, what "val accuracy" even means) that they're branched explicitly
+below rather than forced through one abstraction for two cases. Regression
+also has no discrete label to read from Firestore - its target
+(loaders.xray_ink_coverage) is computed straight from the downloaded image,
+identically at train and eval time.
 
 Usage: python3 train.py --run-id <trainingRunId>
 """
@@ -22,11 +29,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from sklearn.metrics import accuracy_score, log_loss
+from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, r2_score
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from gcp_clients import artifacts_bucket, data_bucket, firestore_client, gcs_uri, parse_gcs_uri
-from loaders import load_entry_vector
+from loaders import load_entry_vector, xray_ink_coverage
 from models import build_model
 
 
@@ -47,6 +54,7 @@ def main(run_id: str):
 
     model_spec_ref = firestore_client.collection("modelSpecs").document(run_data["modelSpecId"])
     model_spec = model_spec_ref.get().to_dict()
+    is_regression = model_spec["type"] == "regression"
 
     dataset_ref = firestore_client.collection("datasets").document(run_data["trainDatasetId"])
     dataset = dataset_ref.get().to_dict()
@@ -58,13 +66,13 @@ def main(run_id: str):
     run_ref.update({"status": "running"})
 
     print("Downloading entry files and extracting features...")
-    vectors, labels, splits = [], [], []
+    vectors, targets, splits = [], [], []
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         for entry in entries:
             local_path = download_entry_file(entry["imagePath"], tmp_path)
-            vectors.append(load_entry_vector(modality, str(local_path)))
-            labels.append(entry["diagnosis"])
+            vectors.append(load_entry_vector(modality, str(local_path), multimodal=is_regression))
+            targets.append(xray_ink_coverage(str(local_path)) if is_regression else entry["diagnosis"])
             splits.append(entry.get("split", "train"))
 
     X = np.stack(vectors)
@@ -74,8 +82,12 @@ def main(run_id: str):
     if not val_mask.any():
         val_mask = train_mask  # no held-out split defined - fall back to training metrics as val
 
-    label_encoder = LabelEncoder()
-    y = label_encoder.fit_transform(labels)
+    label_encoder = None
+    if is_regression:
+        y = np.array(targets, dtype=np.float64)
+    else:
+        label_encoder = LabelEncoder()
+        y = label_encoder.fit_transform(targets)
 
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X[train_mask])
@@ -85,26 +97,38 @@ def main(run_id: str):
     parameters = {**model_spec.get("parameters", {}), **run_data.get("parameterOverrides", {})}
     n_epochs = int(parameters.get("max_iter", 50))
     model = build_model(model_spec["type"], parameters)
-    classes = np.unique(y)
+    classes = np.unique(y) if not is_regression else None
 
     print(f"Training {n_epochs} epochs over {len(X_train)} train / {len(X_val)} val samples...")
     history = []
     for epoch in range(1, n_epochs + 1):
-        model.partial_fit(X_train, y_train, classes=classes)
-        train_loss = log_loss(y_train, model.predict_proba(X_train), labels=classes)
-        val_loss = log_loss(y_val, model.predict_proba(X_val), labels=classes)
-        val_accuracy = accuracy_score(y_val, model.predict(X_val))
+        if is_regression:
+            model.partial_fit(X_train, y_train)
+            train_loss = mean_squared_error(y_train, model.predict(X_train))
+            val_loss = mean_squared_error(y_val, model.predict(X_val))
+            # TrainingEpoch.valAccuracy has no regression-shaped sibling
+            # field in the type system, so it's repurposed to hold R² here
+            # (same idea as ingest_digits.py repurposing Entry.diagnosis for
+            # a non-diagnosis label) - 1.0 is a perfect fit, same direction
+            # as accuracy, just not bounded at 0 for a bad one.
+            val_progress = r2_score(y_val, model.predict(X_val))
+        else:
+            model.partial_fit(X_train, y_train, classes=classes)
+            train_loss = log_loss(y_train, model.predict_proba(X_train), labels=classes)
+            val_loss = log_loss(y_val, model.predict_proba(X_val), labels=classes)
+            val_progress = accuracy_score(y_val, model.predict(X_val))
         history.append(
             {
                 "epoch": epoch,
                 "trainLoss": round(float(train_loss), 4),
                 "valLoss": round(float(val_loss), 4),
-                "valAccuracy": round(float(val_accuracy), 4),
+                "valAccuracy": round(float(val_progress), 4),
             }
         )
         run_ref.update({"trainingHistory": history})
         if epoch % 10 == 0 or epoch == n_epochs:
-            print(f"  epoch {epoch:>3}  trainLoss={train_loss:.4f}  valLoss={val_loss:.4f}  valAcc={val_accuracy:.4f}")
+            metric_name = "valR2" if is_regression else "valAcc"
+            print(f"  epoch {epoch:>3}  trainLoss={train_loss:.4f}  valLoss={val_loss:.4f}  {metric_name}={val_progress:.4f}")
 
     final_train_loss = history[-1]["trainLoss"]
     final_val_loss = history[-1]["valLoss"]
@@ -121,11 +145,12 @@ def main(run_id: str):
     weights_uri = gcs_uri("artifacts", object_path)
 
     now = datetime.now(timezone.utc).isoformat()
+    metric_label = "R²" if is_regression else "val accuracy"
     weight_snapshot = {
         "id": snapshot_id,
         "modelSpecId": model_spec["id"],
         "name": f"Auto-saved from training run {run_id}",
-        "description": f"Trained {n_epochs} epochs, final val accuracy {final_val_accuracy:.3f}",
+        "description": f"Trained {n_epochs} epochs, final {metric_label} {final_val_accuracy:.3f}",
         "savedAt": now,
         "filePath": weights_uri,
         "sourceTrainingRunId": run_id,
@@ -148,7 +173,7 @@ def main(run_id: str):
         }
     )
 
-    print(f"\nDone. status=completed, outputWeightsSnapshotId={snapshot_id}, finalValAccuracy={final_val_accuracy:.3f}")
+    print(f"\nDone. status=completed, outputWeightsSnapshotId={snapshot_id}, final{metric_label.replace(' ', '')}={final_val_accuracy:.3f}")
 
 
 if __name__ == "__main__":

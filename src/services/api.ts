@@ -7,11 +7,14 @@ import type {
   Evaluation,
   Flag,
 } from '../types';
-import { API_BASE_URL } from './config';
+import { API_BASE_URL, API_KEY } from './config';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(API_KEY ? { 'x-api-key': API_KEY } : {}),
+    },
     ...init,
   });
   if (!res.ok) {

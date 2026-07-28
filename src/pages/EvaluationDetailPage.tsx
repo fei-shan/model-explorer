@@ -10,6 +10,7 @@ import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { MetricsPanel } from '../components/evaluation/MetricsPanel';
 import { EntryResultTable } from '../components/evaluation/EntryResultTable';
+import { isEntryResultCorrect } from '../utils/entryResults';
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -89,7 +90,7 @@ export function EvaluationDetailPage() {
 
   const failures = evaluation.entryResults
     .filter((r): r is EntryResult => 'predictedLabel' in r)
-    .filter((r) => r.predictedLabel !== r.trueLabel).length;
+    .filter((r) => !isEntryResultCorrect(r, model?.type)).length;
   const total    = evaluation.entryResults.length;
 
   return (

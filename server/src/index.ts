@@ -5,6 +5,7 @@ import { collectionRoutes } from './routes/collectionRoutes.js';
 import { datasetEntriesRoutes } from './routes/datasetEntries.js';
 import { trainingRunTriggerRoutes } from './routes/trainingRunTrigger.js';
 import { evaluationTriggerRoutes } from './routes/evaluationTrigger.js';
+import { apiKeyGate } from './auth.js';
 import * as evaluationMatrix from './serialize/evaluationMatrix.js';
 
 const app = express();
@@ -12,6 +13,8 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
+
+app.use(apiKeyGate);
 
 app.use('/datasets', datasetEntriesRoutes());
 app.use('/projects', trainingRunTriggerRoutes());

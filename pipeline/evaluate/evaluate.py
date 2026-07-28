@@ -12,6 +12,10 @@ the task-type registry (evaluators.py) -> write entryResults + metrics
 (confusion matrix flattened for Firestore, see firestore_encoding.py) back
 to the Evaluation doc.
 
+Regression has no discrete label to read from Firestore - its target
+(loaders.xray_ink_coverage) is computed straight from the downloaded image,
+identically to train.py, so there's no train/eval skew risk.
+
 Usage: python3 evaluate.py --evaluation-id <evaluationId>
 """
 
@@ -27,7 +31,7 @@ import numpy as np
 from evaluators import evaluate
 from firestore_encoding import encode_confusion_matrix
 from gcp_clients import artifacts_bucket, data_bucket, firestore_client, parse_gcs_uri
-from loaders import load_entry_vector
+from loaders import load_entry_vector, xray_ink_coverage
 
 
 def download_file(gcs_uri_str: str, dest_dir: Path) -> Path:
@@ -47,6 +51,7 @@ def main(evaluation_id: str):
 
     model_spec_ref = firestore_client.collection("modelSpecs").document(eval_data["modelSpecId"])
     model_spec = model_spec_ref.get().to_dict()
+    is_regression = model_spec["type"] == "regression"
 
     weights_snapshot_id = eval_data["weightsSnapshotId"]
     weight_snapshot = next((w for w in model_spec.get("savedWeights", []) if w["id"] == weights_snapshot_id), None)
@@ -72,14 +77,19 @@ def main(evaluation_id: str):
         model, scaler, label_encoder = saved["model"], saved["scaler"], saved["label_encoder"]
 
         print("Downloading entry files and extracting features...")
-        vectors = []
+        vectors, targets = [], []
         for entry in entries:
             local_path = download_file(entry["imagePath"], tmp_path)
-            vectors.append(load_entry_vector(modality, str(local_path)))
+            vectors.append(load_entry_vector(modality, str(local_path), multimodal=is_regression))
+            if is_regression:
+                targets.append(xray_ink_coverage(str(local_path)))
 
     X_raw = np.stack(vectors)
     X = scaler.transform(X_raw)
-    y_true = label_encoder.transform([entry["diagnosis"] for entry in entries])
+    if is_regression:
+        y_true = np.array(targets, dtype=np.float64)
+    else:
+        y_true = label_encoder.transform([entry["diagnosis"] for entry in entries])
 
     print(f"Scoring {len(entries)} entries with {model_spec['architecture']}...")
     entry_results, metrics = evaluate(model_spec["type"], model, label_encoder, entries, X, y_true)
@@ -97,7 +107,10 @@ def main(evaluation_id: str):
         }
     )
 
-    print(f"\nDone. status=completed, accuracy={metrics.get('accuracy')}, f1={metrics.get('f1')}")
+    if is_regression:
+        print(f"\nDone. status=completed, rmse={metrics.get('rmse')}, mae={metrics.get('mae')}, r2={metrics.get('r2')}")
+    else:
+        print(f"\nDone. status=completed, accuracy={metrics.get('accuracy')}, f1={metrics.get('f1')}")
 
 
 if __name__ == "__main__":

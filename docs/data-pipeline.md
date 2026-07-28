@@ -1,281 +1,289 @@
 # Data & Training Pipeline on Google Cloud
 
-This document describes, step by step, how data moves through the system once
-Model Explorer is wired to real Google Cloud infrastructure: how a dataset
-gets from the outside world into storage, how a model and its weights are
-uploaded and stored, how multimodal data is prepared for training/evaluation
-across the different task types the app supports, and how results make it
-back to the frontend for visualization.
+This describes the system **as actually built and deployed**, not as a plan.
+Every resource, endpoint, and file path named below exists and has been
+exercised end-to-end (locally and, for the API/Jobs, via the live deployment)
+at the time of writing. Where something described in an earlier design pass
+was never actually built, that's called out explicitly in §7 rather than
+presented as real.
 
-It documents the target architecture agreed in the connection plan
-(`/Users/Fei/.claude/plans/lazy-singing-lobster.md`). `/server` (Phase 1,
-Firestore CRUD skeleton) already exists; `/pipeline` (Phases 3-4, the actual
-training/eval containers) does not exist yet — those sections describe the
-design to be built, not shipped code.
+## 1. Deployed resources
 
-## 0. Components involved
+| Resource | Type | Name | Notes |
+|---|---|---|---|
+| Metadata store | Firestore (Native mode) | default database, `us-central1` | 7 collections: `users`, `projects`, `datasets`, `modelSpecs`, `trainingRuns`, `evaluations`, `flags` |
+| Dataset storage | GCS bucket | `<project>-model-explorer-data` | raw entry files (CSV, PNG) |
+| Model storage | GCS bucket | `<project>-model-explorer-artifacts` | pickled trained models |
+| API | Cloud Run **Service** | `model-explorer-api` | Express, public URL, gated by an API key (§6) |
+| Training compute | Cloud Run **Job** | `train-job` | Python, `scikit-learn` |
+| Evaluation compute | Cloud Run **Job** | `evaluate-job` | Python, `scikit-learn` |
+| API identity | Service account | `api-runtime@<project>.iam.gserviceaccount.com` | Firestore R/W, GCS R/W both buckets, mints signed URLs, triggers both Jobs |
+| Job identity | Service account | `training-job-runtime@<project>.iam.gserviceaccount.com` | Firestore R/W, GCS read on data bucket, R/W on artifacts bucket. Shared by both Jobs — same trust boundary, no reason for a third SA |
+| API key secret | Secret Manager | `api-key` | app-level auth for the public API (§6) |
+| Job-trigger role | Custom IAM role | `projects/<project>/roles/trainJobTrigger` | `run.jobs.{get,run,runWithOverrides}` only — bound to `api-runtime` on both Job resources specifically, not project-wide. Deliberately narrower than the predefined `roles/run.developer`, which also grants create/delete on all Cloud Run resources. Name predates `evaluate-job` existing; still accurate in scope, just not in naming |
+| Container images | Artifact Registry | `us-central1-docker.pkg.dev/<project>/model-explorer/{api,train,evaluate}` | pushed via Cloud Build, no local Docker involved |
 
-| Component | Tech | Role |
-|---|---|---|
-| Frontend | React/Vite/Zustand (`src/`) | UI, polls run status, renders charts |
-| API | Node/Express, Cloud Run service (`server/`) | only component holding GCP credentials; all reads/writes to Firestore/GCS go through it |
-| Metadata store | Firestore (Native mode) | `projects`, `datasets`, `modelSpecs`, `trainingRuns`, `evaluations`, `flags`, `users` — mirrors `src/types/index.ts` 1:1 |
-| Object storage | Cloud Storage, 2 buckets | `<project>-model-explorer-data` (raw + processed dataset files), `<project>-model-explorer-artifacts` (trained weights) |
-| Compute | Cloud Run Jobs (Python containers, `/pipeline`) | training job, evaluation job |
-
-The one architectural rule everything below follows: **the frontend and API
-never talk to a training/eval job directly.** They only create a status
-document (`trainingRuns/{id}` or `evaluations/{id}`) and poll it. The job
-reads its own instructions from that document and writes progress back into
-it. This is what lets compute be swapped (Cloud Run Job today, Vertex AI
-later) without changing the frontend or API contract.
-
----
-
-## 1. How data gets from the system into storage (dataset ingestion)
-
-This is the path for adding a new `Dataset` (a `Entry[]` of subjects/sessions
-tagged with a `modalityType`).
-
-1. **User initiates upload** in the frontend (Dataset creation/edit flow),
-   selecting one or more raw files (images, ECG signal files, clinical note
-   text) plus per-entry metadata (`subjectId`, `sessionId`, `date`, `age`,
-   `sex`, `diagnosis`, `modalityType`, `split`).
-2. **Frontend requests a signed upload URL** from the API:
-   `POST /datasets/:id/entries/upload-url` (new endpoint, Phase 2) with the
-   file's content type and a proposed object path. The API does **not**
-   proxy file bytes itself — for anything beyond toy-sized files, routing
-   binary uploads through the Express process wastes Cloud Run request time
-   and memory.
-3. **API generates a V4 signed URL** (`storage.bucket(...).file(...).getSignedUrl()`)
-   scoped to `raw/<datasetId>/<entryId>.<ext>` in the data bucket, valid for
-   a short TTL (e.g. 15 min), and returns it to the frontend. This is why the
-   `api-runtime` service account needs GCS write scoped to that bucket, even
-   though the actual bytes never pass through the API container.
-4. **Frontend uploads the file directly to GCS** via `PUT` to the signed URL.
-   No GCP credentials are ever exposed to the browser — the signed URL itself
-   is the (time-limited) credential.
-5. **Frontend confirms the upload**: `POST /datasets/:id/entries` with the
-   entry metadata and the now-known `gs://<bucket>/raw/<datasetId>/<entryId>.<ext>`
-   path. The API writes this as an `Entry` inside the `Dataset` document's
-   `entries` array in Firestore (embedded array, not a subcollection — fine
-   under Firestore's 1MB doc limit at this dataset scale; see §7 for the
-   scale-out plan).
-6. **Optional ingest-time normalization**: for modalities that benefit from a
-   canonical processed form (e.g. resizing/normalizing images, resampling
-   ECG signal arrays), the API triggers a lightweight Cloud Run Job (or, for
-   Phase 2 toy scale, does it inline) that reads `raw/<datasetId>/<entryId>.<ext>`,
-   writes a normalized version to `processed/<datasetId>/<entryId>.<ext>`, and
-   records that path back on the `Entry`. This runs once at ingest, not on
-   every training run, so training jobs never redo the same resize/normalize
-   work.
-7. Dataset is now queryable/servable through the API exactly like a seeded
-   mock dataset: `GET /datasets/:id` returns the full document including all
-   `entries`, each with a real `gs://...` path instead of the mock
-   `/data/mri/...` placeholder string.
-
-**Storage layout convention** (data bucket):
-```
-raw/<datasetId>/<entryId>.<ext>          # original file, uploaded as-is
-processed/<datasetId>/<entryId>.<ext>    # normalized/resized, produced once
+Get the live API URL and key:
+```bash
+gcloud run services describe model-explorer-api --region us-central1 --format='value(status.url)'
+gcloud secrets versions access latest --secret=api-key
 ```
 
+**Everything cross-service is authenticated via short-lived impersonation**
+(`google.auth.impersonated_credentials` in Python, `Impersonated` from
+`google-auth-library` in Node) — there is no downloaded service-account key
+file anywhere in this system, in code, in git, or on any deployed container.
+The same code runs unmodified whether the ambient identity already *is* the
+target service account (Cloud Run, in production — effectively
+self-impersonation) or a human's `gcloud auth application-default login`
+session with `roles/iam.serviceAccountTokenCreator` on that service account
+(local dev). See `server/src/gcs.ts`, `server/src/cloudRunJobs.ts`,
+`pipeline/*/gcp_clients.py`.
+
 ---
 
-## 2. How a model is uploaded and stored
+## 2. Dataset ingestion
 
-A `ModelSpec` describes an architecture/config; its `savedWeights` array
-holds zero or more `WeightSnapshot`s (a base pretrained checkpoint, or the
-output of a previous training run). Two upload paths exist:
+Real flow, exercised by `pipeline/ingest/*.py` and (once the frontend's
+upload UI exists — see §7) will be exercised by the browser identically:
 
-### 2a. Model spec creation (no weights yet)
-1. User fills in the model form: `name`, `type` (`classification` |
-   `regression` | `detection` | `segmentation` | `clustering` |
-   `llm-finetuning`), `architecture`, and `parameters` (hyperparameter
-   key/value map).
-2. `POST /modelSpecs` writes the doc straight to Firestore — no GCS
-   involved, since there's no binary payload yet.
+1. Caller asks the API for a signed upload URL:
+   `POST /datasets/:datasetId/entries/upload-url` with `{entryId,
+   contentType, ext}` (`server/src/routes/datasetEntries.ts`).
+2. API mints a V4 signed URL scoped to
+   `raw/<datasetId>/<entryId>.<ext>` in the data bucket, via
+   `getUploadUrl()` in `server/src/gcs.ts`.
+3. Caller `PUT`s the file bytes directly to that signed URL — straight to
+   GCS, never through the API process.
+4. Caller confirms: `POST /datasets/:datasetId/entries` with the entry's
+   metadata (`subjectId`, `diagnosis`, `modalityType`, etc.) plus the
+   `gs://...` path. The API appends it to the `Dataset` document's `entries`
+   array in Firestore (`server/src/routes/datasetEntries.ts`, upsert-by-id
+   so re-confirming an entry doesn't duplicate it).
 
-### 2b. Uploading a weight snapshot (e.g. bringing an externally pretrained checkpoint)
-1. Frontend requests a signed upload URL the same way as §1 step 2-3, this
-   time scoped to the **artifacts bucket**:
-   `artifacts/<modelSpecId>/<snapshotId>.<ext>` (`.pt`/`.h5`/`.pkl`/etc.
-   depending on framework).
-2. Frontend `PUT`s the weight file directly to GCS via the signed URL.
-3. Frontend confirms: `POST /modelSpecs/:id/weights` with the snapshot
-   metadata (`name`, `description`, `filePath` = the `gs://...` URI). API
-   appends a `WeightSnapshot` to the `ModelSpec.savedWeights` array in
-   Firestore.
+**What's actually in GCS right now**, produced by this exact flow:
+`raw/ds-breast-cancer-train/en-bc-*.csv` (30 numeric features per file),
+`raw/ds-breast-cancer-eval/en-bce-*.csv` (a disjoint held-out set),
+`raw/ds-digits-train/en-dg-*.png` (64×64 upscaled digit images).
 
-### 2c. Weights produced by training (the more common path)
-This does not go through the upload flow at all — the training job itself
-writes directly to the artifacts bucket and Firestore at the end of a run
-(see §4 step 6). The distinction matters operationally: uploaded weights use
-the `api-runtime` service account's signed-URL flow; job-produced weights use
-the `training-job-runtime` service account's direct write scoped to the
-artifacts bucket. Neither service account can do the other's job — that's
-the intended least-privilege boundary from the provisioning plan.
+---
 
-**Storage layout convention** (artifacts bucket):
+## 3. Model weights
+
+**Only one path exists today: weights produced by a training run.**
+`pipeline/train/train.py` pickles `{model, scaler, label_encoder}` and
+uploads it directly to `artifacts/<modelSpecId>/w-<trainingRunId>.pkl`
+using the `training-job-runtime` identity, then appends a `WeightSnapshot`
+to the `ModelSpec.savedWeights` array in Firestore.
+
+There is **no** "upload your own pretrained weights" endpoint
+(`POST /modelSpecs/:id/weights`) — an earlier design pass planned one, but
+it was never built. If you want to evaluate an externally-trained model,
+today the only way in is to make `pipeline/train` produce it, not to upload
+a `.pt`/`.pkl` file directly. Worth building if that use case comes up (see
+§7).
+
+---
+
+## 4. Multimodal preprocessing — what's actually implemented
+
+`pipeline/train/loaders.py` and `pipeline/evaluate/loaders.py` (identical,
+intentionally duplicated — see that file's docstring) are split into two
+layers, deliberately kept separate:
+
+**Layer 1 — generic, data-type-level loaders.** These have no idea which
+clinical modality they're loading:
+
+```python
+def load_image(local_path, size=(8,8)) -> np.ndarray: ...   # any image file -> flattened [0,1] pixel vector
+def load_tabular(local_path) -> np.ndarray: ...              # any 'feature,value' CSV -> sorted feature vector
+def bag_of_words(text, vocab) -> np.ndarray: ...              # any text string -> presence vector against a fixed vocab
 ```
-artifacts/<modelSpecId>/<snapshotId>.<ext>
+
+`load_image` loads MRI, CT, X-Ray, or Pathology-as-images identically — same
+bytes in, same vector out. This is the reusable part; adding a new
+image-shaped modality needs zero new loader code.
+
+**Layer 2 — a thin modality → data-type mapping**, the only clinically-aware
+part of the above:
+
+```python
+ALL_MODALITIES = ["MRI", "ECG", "CT", "Pathology", "Clinical Note", "X-Ray"]  # every value the type system allows
+MODALITY_DATA_TYPE = {"Pathology": "tabular", "X-Ray": "image"}               # only these two implemented
+DATA_TYPE_LOADERS = {"image": load_image, "tabular": load_tabular}
 ```
 
----
+Only `Pathology`/`X-Ray` are mapped; anything else raises
+`NotImplementedError` naming what *is* supported, rather than silently
+guessing. Same registry pattern in `pipeline/train/models.py` /
+`pipeline/evaluate/evaluators.py` for `ModelSpec.type`:
 
-## 3. How multimodal data is processed before training/evaluation
+```python
+ALL_MODEL_TYPES = ["classification", "regression", "detection", "segmentation", "clustering", "llm-finetuning"]
+MODEL_BUILDERS = {
+    "classification": build_classifier,  # SGDClassifier(loss='log_loss') — real per-epoch SGD, not LogisticRegression's opaque batch .fit()
+    "regression": build_regressor,       # SGDRegressor, same per-epoch-progress reasoning
+}
+```
 
-The training/eval container is **one image with a small internal registry of
-loader/model plugins**, not one container per modality. Which plugin runs is
-selected by `ModelSpec.type` + `ModelSpec.architecture` — both already exist
-as fields on the type, so no schema change is needed to route to the right
-plugin.
+`classification` and `regression` both have real trainers/evaluators today.
+Three seeded `ModelSpec`s: `ms-logreg-breast-cancer` and `ms-logreg-digits`
+(`classification`), plus `ms-sgdreg-xray-caption` (`regression`, see below).
 
-Common preprocessing steps (every modality, every task type):
+### The multimodal (image + text) regression task
 
-1. Job starts with a `trainingRunId` (or `evaluationId`) argument.
-2. Looks up the `TrainingRun`/`Evaluation` doc in Firestore → gets
-   `modelSpecId`, `trainDatasetId`/`datasetId`, `parameterOverrides`.
-3. Looks up the `Dataset` doc → gets the full `Entry[]` list, each with a
-   `gcsUri` (the `processed/` path if one exists, else `raw/`) and a label
-   (`diagnosis`, or task-appropriate target).
-4. Splits entries by `Entry.split` (`'train'` | `'val'`) if present;
-   otherwise the job performs a deterministic split (seeded) so runs are
-   reproducible.
-5. Downloads the needed files to local container disk. At current (toy)
-   scale this is done eagerly for the whole split; no streaming/sharding
-   layer yet (explicitly deferred — see §7).
-6. Dispatches to a **modality-specific loader** that turns raw bytes into a
-   feature array:
+`ms-sgdreg-xray-caption`, on the `p-digits` project, reuses the *same*
+`ds-digits-train` images the classification `ModelSpec` trains on — no
+separate ingestion needed, because both the input's text component and the
+regression target are **computed from the image at train/eval time**, not
+stored anywhere. This is the one place `loaders.py` goes beyond the two
+generic layers, because there's no way to make "derive a caption from an
+image" itself generic — same reason detection/segmentation will each need
+their own logic later, not just a registry entry:
 
-   | `modalityType` | Loader behavior |
-   |---|---|
-   | `MRI`, `CT`, `X-Ray`, `Pathology` | PIL/`numpy` open → resize → normalize to a fixed tensor shape. (Real DICOM/NIfTI parsing with `pydicom`/`nibabel` is out of scope for v1; source data is converted to plain PNG/`.npy` at ingest time instead, per §1 step 6.) |
-   | `ECG` | Parse the numeric signal array (`.csv`/`.npy`) → optional resampling to a fixed length → hand-crafted or windowed features. |
-   | `Clinical Note` | Tokenize / TF-IDF vectorize (classical) or tokenize with the model's tokenizer (for `llm-finetuning`). |
+- `derive_xray_caption(pixels)` turns real pixel statistics (stroke
+  left-right symmetry) into a short natural-language string, built from
+  `load_image`'s output — then `bag_of_words()` (the same generic function
+  layer 1 exposes) vectorizes it and it's concatenated onto the 64-dim pixel
+  vector (66-dim total input). The captioning step is domain-specific; the
+  vectorizer it hands off to is not.
+- `xray_ink_coverage()` (mean pixel intensity) is the real, continuous
+  regression target — deliberately a *different* derived quantity than what
+  the caption describes (symmetry vs. density), so the caption is a
+  genuinely separate signal rather than a bucketed restatement of the
+  answer.
+- Feature extraction is identical at train and eval time (same function,
+  same image), so there's no train/eval skew risk despite nothing being
+  persisted.
 
-7. Dispatches to a **modality- and task-appropriate model**, again selected
-   by `ModelSpec.type`:
+`load_entry_vector(modality_type, local_path, multimodal=...)` is the single
+dispatch point: it looks up the data type for the modality, calls the
+matching layer-1 loader, and — only when `multimodal=True` and the data type
+is `"image"` — hands that loader's output to the captioning step. `train.py`
+requests `multimodal=True` by checking `ModelSpec.type == "regression"`, not
+`Dataset.modalities`, since it's the same `X-Ray` images either way, just a
+different feature representation for a different task.
 
-   | `ModelSpec.type` | Typical model for v1 | Feeds which `EvaluationMetrics` fields |
-   |---|---|---|
-   | `classification` | tiny CNN (image) / logistic regression (ECG, tabular) | `accuracy`, `auc`, `f1`, `sensitivity`, `specificity`, `confusionMatrix` |
-   | `regression` | linear/ridge regression | `rmse`, `mae`, `r2` |
-   | `detection`, `segmentation` | deferred past v1 toy slice — same loader stage applies, model stage is a stub until real data justifies it | (n/a for v1) |
-   | `clustering` | k-means / hierarchical over extracted features | `silhouetteScore`, `daviesBouldinIndex`, `calinskiHarabaszIndex`, `numClusters`, `clusterSizes` |
-   | `llm-finetuning` | small causal LM fine-tune (e.g. LoRA on a small base model) over `Clinical Note` text | `perplexity`, `rougeL`, `bleu`, `bertScore`, `benchmarks` |
+**A real numerical instability, found and fixed while building this**:
+`SGDRegressor`'s default `learning_rate='optimal'` schedule takes steps
+large enough, on this data scale (16 train samples, 66-dim input), to
+overfit within a handful of epochs regardless of regularization strength —
+and was observed to occasionally diverge to astronomical loss values at low
+`alpha`. Verified by direct hyperparameter sweep (not guesswork):
+`learning_rate='constant'` with a small `eta0` fixes the instability and
+gives an actually gradual, chart-worthy convergence curve. Even so, R² on
+the training loop's internal 4-sample validation split lands *negative*
+(around -1.1) — not a bug: those 4 samples' targets have a standard
+deviation of ~0.015 (they happen to be similarly inked digits), so R²'s
+variance-normalized denominator is tiny and even a small absolute error
+produces a harsh score. On the real, separately-ingested 10-sample held-out
+`ds-digits-eval` set, the same model scores R²=0.385, MAE=0.024 — MAE/RMSE
+are the more honest read of this model at this data scale, which is why
+both are reported alongside R² rather than R² alone.
 
-   These are intentionally toy-scale, not the full ResNet-50/ClinicalBERT
-   implementations the mock data's `architecture` strings imply — v1 proves
-   real-data-to-real-model plumbing, not modeling quality.
-8. `parameterOverrides` from the `TrainingRun`/`Evaluation` doc (already a
-   `Record<string, string | number | boolean>` on the type) are applied on
-   top of the `ModelSpec.parameters` defaults before the model is
-   constructed — this is how a user's per-run hyperparameter tweak in the UI
-   reaches the actual training loop.
-
----
-
-## 4. Training run lifecycle (Cloud Run Job)
-
-1. User starts a run from `TrainingDetailPage` (or a "new run" form) →
-   frontend calls `POST /projects/:id/training-runs` with `modelSpecId`,
-   `trainDatasetId`, optional `baseWeightsSnapshotId`, `parameterOverrides`.
-2. API creates the `TrainingRun` Firestore doc with `status: 'pending'`,
-   `trainingHistory: []`, and returns its `id` immediately (does not wait
-   for the job to finish).
-3. API calls the Cloud Run Jobs API (`jobs.run`), passing the new run's `id`
-   as a container argument/env var.
-4. Job container starts, does the lookup/preprocessing from §3, sets
-   `status: 'running'` on the doc, then loops over N training iterations
-   (epochs). Loop uses `training-job-runtime` credentials, scoped to
-   Firestore writes on `trainingRuns`/`evaluations` and R/W on both buckets.
-5. **After every epoch**, the job appends one `TrainingEpoch` (`epoch`,
-   `trainLoss`, `valLoss`, `valAccuracy`) to `trainingHistory` on the
-   Firestore doc. This per-epoch write is what keeps `TrainingHistoryChart`
-   meaningful against real numbers instead of the current simulated curve.
-6. On completion: job uploads the final weights to
-   `artifacts/<modelSpecId>/<newSnapshotId>.<ext>`, writes a new
-   `WeightSnapshot` onto the `ModelSpec.savedWeights` array, sets
-   `outputWeightsSnapshotId` on the `TrainingRun` doc, computes
-   `finalMetrics` (`finalTrainLoss`, `finalValLoss`, `finalValAccuracy`,
-   `epochs`), and sets `status: 'completed'` (or `'failed'` + error info if
-   an exception occurred, so the frontend can show a failure state instead
-   of hanging on "running").
-
-## 5. Evaluation run lifecycle (mirrors training)
-
-1. Frontend calls `POST /projects/:id/evaluations` with `modelSpecId`,
-   `weightsSnapshotId`, `datasetId`.
-2. API creates the `Evaluation` doc, `status: 'pending'`, calls the eval
-   Cloud Run Job.
-3. Job downloads the specified weight snapshot from the artifacts bucket,
-   runs the §3 preprocessing pipeline over the held-out split, and produces
-   one result per entry — the shape depends on `ModelSpec.type`:
-   - classification/regression → `EntryResult` (`predictedLabel`,
-     `trueLabel`, `confidence`)
-   - clustering → `ClusteringEntryResult` (`clusterId`,
-     `distanceToCentroid`, `silhouetteScore`)
-   - llm-finetuning → `LLMEntryResult` (`prompt`, `referenceCompletion`,
-     `generatedCompletion`, `rougeL`, `bleu`)
-4. Job writes the full `entryResults: AnyEntryResult[]` array and the
-   aggregate `metrics: EvaluationMetrics` onto the `Evaluation` doc, sets
-   `completedAt`, `status: 'completed'`.
+**A real frontend bug, found and fixed while wiring this up**: three places
+(`EvaluationDetailPage.tsx`, `EvalMetricsSummary.tsx`, `EntryResultTable.tsx`)
+computed prediction "failures" via exact string equality on
+`predictedLabel`/`trueLabel` — correct for classification, but a regression
+prediction essentially never exactly equals a continuous target, so every
+row would've shown as a failure regardless of model quality. Fixed with a
+shared `isEntryResultCorrect()` helper (`src/utils/entryResults.ts`) that
+uses a tolerance-based comparison for `regression` and exact match for
+everything else; `EvalMetricsSummary` also gained a dedicated `regression`
+branch (headline R²/RMSE instead of an undefined "accuracy").
 
 ---
 
-## 6. How results reach the frontend for visualization
+## 5. Training and evaluation lifecycle
 
-Neither the training job nor the eval job ever talks to the frontend. The
-only channel is: **job writes Firestore doc → API serves Firestore doc →
-frontend polls API on an interval → React state update → chart re-render.**
+**Training** — `POST /projects/:projectId/training-runs`
+(`server/src/routes/trainingRunTrigger.ts`):
+1. Creates the `TrainingRun` doc (`status: 'pending'`), appends its id to
+   `Project.trainingRunIds`.
+2. Calls `runTrainingJob(id)` (`server/src/cloudRunJobs.ts`) — a direct
+   Cloud Run Admin REST call (`POST .../jobs/train-job:run`) with an
+   `overrides.containerOverrides[].env` setting `TRAINING_RUN_ID=<id>`.
+   Fire-and-forget: the HTTP response returns as soon as the execution is
+   *created*, not when it finishes.
+3. Responds `202` immediately with the pending doc.
+4. Inside the Job (`pipeline/train/train.py`): looks up the run → its
+   `ModelSpec` + `Dataset` → downloads every entry file → extracts features
+   via §4's loader → trains `SGDClassifier` one epoch at a time via
+   `partial_fit`, writing the full `trainingHistory` array to Firestore
+   after **every single epoch** (real progress, not a simulated curve) →
+   on completion, uploads weights (§3), sets `finalMetrics`, sets
+   `status: 'completed'`.
 
-1. `TrainingDetailPage.tsx` (currently ~lines 44-64 run a `setTimeout` +
-   `generateTrainingHistory()` mock) is replaced, gated by `VITE_USE_API`,
-   with a polling hook: `GET /trainingRuns/:id` every few seconds while
-   `status` is `'pending'`/`'running'`, stopping once `'completed'`/`'failed'`.
-2. Each poll response's `trainingHistory: TrainingEpoch[]` feeds
-   `TrainingHistoryChart` (`src/components/training/TrainingHistoryChart.tsx`)
-   directly — it already takes `TrainingEpoch[]` as its only prop, so the
-   real per-epoch Firestore data is a drop-in replacement for the simulated
-   array, no chart code changes needed. The component renders two Recharts
-   line charts (train/val loss; val accuracy) that update as new epochs
-   arrive during polling.
-3. `finalMetrics` (once `status: 'completed'`) can be surfaced the same way
-   evaluation metrics are today.
-4. `EvaluationDetailPage.tsx` (currently ~lines 48-55, same simulate pattern)
-   gets the equivalent polling hook against `GET /evaluations/:id`.
-5. The response's `metrics: EvaluationMetrics` and `entryResults` feed the
-   existing, already task-aware visualization components — again no chart
-   changes needed, since these components already branch on `modelType`:
-   - `MetricsPanel` (`src/components/evaluation/MetricsPanel.tsx`) renders
-     metric cards + the confusion matrix table for classification/regression,
-     cluster-size bars for clustering, benchmark grid for llm-finetuning.
-   - `EvalMetricsSummary` (`src/components/evaluation/EvalMetricsSummary.tsx`)
-     renders the compact headline number (accuracy / silhouette / perplexity)
-     used in list views.
-6. Because both pages already branch their rendering on `ModelSpec.type` and
-   consume exactly the `TrainingEpoch`/`EvaluationMetrics`/`AnyEntryResult`
-   shapes the Firestore docs are written in, **the visualization layer needs
-   zero changes** — only the data-fetching (simulate → poll) swap described
-   in step 1/4.
+**Evaluation** — `POST /projects/:projectId/evaluations`
+(`server/src/routes/evaluationTrigger.ts`) mirrors this exactly, triggering
+`evaluate-job` instead. Inside the Job
+(`pipeline/evaluate/evaluate.py`): downloads the specified
+`WeightSnapshot`'s pickle + every entry in the (held-out) evaluation
+dataset, scores them, writes `entryResults` (`EntryResult[]`) and `metrics`
+(`EvaluationMetrics`) to the `Evaluation` doc.
+
+**A genuine Firestore constraint surfaced here and is handled explicitly**:
+Firestore rejects arrays nested directly inside arrays, and
+`EvaluationMetrics.confusionMatrix.matrix` is `number[][]`. Both the Node
+side (`server/src/serialize/evaluationMatrix.ts`) and the Python side
+(`pipeline/evaluate/firestore_encoding.py`) flatten it to
+`{rows, cols, values}` on write and the Node side reshapes it back to
+`number[][]` on every `GET` — verified round-tripping the exact original
+matrix, both locally and via a real Cloud Run Job execution. (The deployed
+API service itself has been verified for the training-trigger and
+signed-URL paths, not yet for a full evaluation run end-to-end through it
+specifically — worth a quick check before relying on it.)
+
+Both routes are fire-and-forget by design: nothing in this system ever
+blocks an HTTP request on a training run finishing (some take minutes,
+including Cloud Run cold-start).
 
 ---
 
-## 7. Explicitly deferred (not part of this pass)
+## 6. Auth
 
-- Streaming/sharded dataset download for the training job once datasets
-  exceed "a few hundred entries download eagerly to local disk."
-- Moving `Dataset.entries` out of the embedded Firestore array into a
-  subcollection (or BigQuery) once a dataset nears the 1MB document ceiling.
-- Real DICOM/NIfTI ingestion (`pydicom`/`nibabel`) instead of pre-converted
-  PNG/`.npy`.
-- `detection`/`segmentation` model implementations (loader stage is designed
-  to support them; model stage is a v1 stub).
-- Authenticating the Cloud Run API (API key or Firebase Auth ID tokens) —
-  currently designed for local/single-user dev, defaults to
-  allow-unauthenticated.
-- CI/CD (Cloud Build triggers for the API and pipeline container images).
-- Swapping Cloud Run Jobs → Vertex AI Custom Training/Pipelines — no
-  frontend/API contract change required when this happens, since both write
-  to the same `trainingRuns`/`evaluations` doc shape.
+The deployed API has **no** built-in login/session system — same mock
+user picker as demo mode. What *is* real: a shared-secret gate
+(`server/src/auth.ts`) in front of every route except `/health`. Only
+enforced when the `API_KEY` env var is set (always true when deployed via
+Secret Manager; unset — so a no-op — for local dev). The frontend sends it
+as `x-api-key` when `VITE_API_KEY` is configured
+(`src/services/api.ts`).
+
+Cloud Run itself is set to `--allow-unauthenticated` — its own IAM-based
+caller auth requires a Google-signed token, which a public static-site
+browser client can't practically present, so the app-level key is the
+actual access control, not Cloud Run's.
+
+---
+
+## 7. Explicitly not built (don't assume these exist)
+
+- **Frontend upload UI** for datasets/model weights — §2's flow is real and
+  callable, but only `pipeline/ingest/*.py` scripts call it today. No
+  "upload a file" button exists in the app yet.
+- **`POST /modelSpecs/:id/weights`** (upload externally-trained weights) —
+  see §3. Only job-produced weights exist.
+- **`detection`, `segmentation`, `clustering`, `llm-finetuning`**
+  loaders/trainers/evaluators — the registries in §4 are structured to add
+  these later (one new function each, no orchestration changes needed), but
+  none exist yet. (`regression` *is* now implemented — see §4.)
+- **Real DICOM/NIfTI ingestion** — images are assumed pre-converted to
+  plain PNG/CSV at ingest time; no `pydicom`/`nibabel` anywhere.
+- **CI/CD** — every deploy in this document (`gcloud builds submit` +
+  `gcloud run deploy` / `gcloud run jobs create`) is a manual command run
+  by a human. No Cloud Build trigger fires on `git push`.
+- **Real user auth** — the login page's user picker is exactly as fake in
+  real mode as in demo mode. The API key (§6) controls *whether a caller
+  can reach the API at all*, not *which user they are*.
+- **Streaming/sharded downloads** — training/eval jobs download every entry
+  file to local disk eagerly. Fine at "tens of entries"; will not scale to
+  large datasets without rework.
+- **Entries as a subcollection** — `Dataset.entries` is still one embedded
+  Firestore array. Will hit the 1MB document ceiling well before it hits
+  any real scale problem.
+- **Vertex AI** — Cloud Run Jobs were chosen for lowest setup cost. The
+  `TrainingRun`/`Evaluation` doc-based contract (§5) was deliberately kept
+  decoupled from *how* compute runs, so swapping to Vertex AI Pipelines
+  later shouldn't require a frontend or API contract change — but this is
+  an untested design intention, not something proven by this codebase.
