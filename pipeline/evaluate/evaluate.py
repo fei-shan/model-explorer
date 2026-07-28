@@ -6,15 +6,18 @@ pipeline/train/train.py's local/Cloud-Run duality.
 
 Steps: look up the Evaluation doc -> its ModelSpec (find the requested
 WeightSnapshot's filePath) + Dataset -> download the pickled model/scaler/
-label_encoder and every entry's raw file from GCS -> extract features via
-the modality registry (loaders.py, identical to training's) -> score via
-the task-type registry (evaluators.py) -> write entryResults + metrics
-(confusion matrix flattened for Firestore, see firestore_encoding.py) back
-to the Evaluation doc.
+label_encoder/vectorizer and every entry's raw file from GCS -> extract
+features via the modality registry (loaders.py, identical to training's) ->
+score via the task-type registry (evaluators.py) -> write entryResults +
+metrics (confusion matrix flattened for Firestore, see
+firestore_encoding.py) back to the Evaluation doc.
 
 Regression has no discrete label to read from Firestore - its target
 (loaders.xray_ink_coverage) is computed straight from the downloaded image,
-identically to train.py, so there's no train/eval skew risk.
+identically to train.py, so there's no train/eval skew risk. Its caption
+text is vectorized with the SAME fitted TfidfVectorizer training produced
+(pickled alongside the model) - transform only, never refit, so eval
+captions are scored against the training vocabulary, not their own.
 
 Usage: python3 evaluate.py --evaluation-id <evaluationId>
 """
@@ -31,7 +34,7 @@ import numpy as np
 from evaluators import evaluate
 from firestore_encoding import encode_confusion_matrix
 from gcp_clients import artifacts_bucket, data_bucket, firestore_client, parse_gcs_uri
-from loaders import load_entry_vector, xray_ink_coverage
+from loaders import derive_xray_caption, load_entry_vector, load_image, vectorize_caption, xray_ink_coverage
 
 
 def download_file(gcs_uri_str: str, dest_dir: Path) -> Path:
@@ -75,14 +78,19 @@ def main(evaluation_id: str):
         with open(model_local_path, "rb") as f:
             saved = pickle.load(f)
         model, scaler, label_encoder = saved["model"], saved["scaler"], saved["label_encoder"]
+        vectorizer = saved.get("vectorizer")
 
         print("Downloading entry files and extracting features...")
         vectors, targets = [], []
         for entry in entries:
             local_path = download_file(entry["imagePath"], tmp_path)
-            vectors.append(load_entry_vector(modality, str(local_path), multimodal=is_regression))
             if is_regression:
-                targets.append(xray_ink_coverage(str(local_path)))
+                pixels = load_image(str(local_path))
+                caption = derive_xray_caption(pixels)
+                vectors.append(np.concatenate([pixels, vectorize_caption(vectorizer, caption)]))
+                targets.append(xray_ink_coverage(pixels))
+            else:
+                vectors.append(load_entry_vector(modality, str(local_path)))
 
     X_raw = np.stack(vectors)
     X = scaler.transform(X_raw)

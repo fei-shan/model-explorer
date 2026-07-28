@@ -3,25 +3,36 @@ Feature loaders, per docs/data-pipeline.md §3-4.
 
 Two layers, deliberately kept separate:
 
-1. Generic, data-type-level loaders (load_image, load_tabular, bag_of_words)
-   - these have no idea which clinical modality they're loading. load_image
-   loads MRI, CT, X-Ray, or Pathology-as-images identically; the same file
-   bytes in, the same vector out, regardless of what a human would call the
-   modality. This is the reusable part.
+1. Generic, data-type-level loaders (load_image, load_tabular,
+   fit_caption_vectorizer/vectorize_caption) - these have no idea which
+   clinical modality they're loading. load_image loads MRI, CT, X-Ray, or
+   Pathology-as-images identically; the same file bytes in, the same
+   vector out, regardless of what a human would call the modality. This is
+   the reusable part.
 
 2. A thin ModalityType -> data-type mapping (MODALITY_DATA_TYPE) plus one
    piece of genuinely domain-specific logic (deriving an X-Ray caption from
-   pixel statistics, and the multimodal composition that uses it). There's
-   no way to make "derive a caption from an image" generic the way loading
-   pixels is generic - same reason detection/segmentation will each need
-   their own logic later, not just a registry entry. Kept small and
-   clearly separated so it's obvious which parts of this file are reusable
-   infrastructure and which are this one toy task's specific choices.
+   pixel statistics, and the regression target derived from the same
+   pixels). There's no way to make "derive a caption from an image" generic
+   the way loading pixels is generic - same reason detection/segmentation
+   will each need their own logic later, not just a registry entry. Kept
+   small and clearly separated so it's obvious which parts of this file are
+   reusable infrastructure and which are this one toy task's specific
+   choices.
 
 Adding a new image-shaped modality (real MRI, say) needs zero new loader
 code - just one new line in MODALITY_DATA_TYPE. Adding a new *text* file
-modality (a real Clinical Note) would reuse bag_of_words as-is and only
-need a small "read the file into a string" step, not a new vectorizer.
+modality (a real Clinical Note) would reuse fit_caption_vectorizer/
+vectorize_caption as-is and only need a small "read the file into a
+string" step, not a new vectorizer.
+
+Text -> vector uses a fitted TfidfVectorizer, not a hand-picked fixed
+vocabulary: the vocabulary is learned from the actual training captions
+(fit once on train.py's training split, pickled alongside the model, then
+only ever .transform()'d - never refit - at eval time), so it generalizes
+to whatever text a project actually has instead of only the specific words
+someone anticipated in advance. Mirrors the exact fit-on-train/apply-
+everywhere pattern already used for StandardScaler.
 
 Identical to pipeline/train/loaders.py - see that file's module docstring
 for why this is duplicated rather than shared as a package. Extraction MUST
@@ -34,6 +45,7 @@ from typing import Tuple
 import csv
 import numpy as np
 from PIL import Image
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 # ── Layer 1: generic, data-type-level loaders ────────────────────────────────
 
@@ -55,12 +67,24 @@ def load_tabular(local_path: str) -> np.ndarray:
     return np.array([float(r["value"]) for r in rows], dtype=np.float64)
 
 
-def bag_of_words(text: str, vocab: list) -> np.ndarray:
-    """Any text string -> presence vector against a fixed vocabulary.
-    Generic across every text source - doesn't care whether the text came
-    from a file or was derived/generated, only that it's a string."""
-    words = set(text.lower().split())
-    return np.array([1.0 if w in words else 0.0 for w in vocab], dtype=np.float64)
+def fit_caption_vectorizer(captions: list) -> TfidfVectorizer:
+    """Fit a TF-IDF vectorizer on a corpus of caption strings. Call this
+    ONCE, on the training split's captions only (never on val/eval
+    captions - that would leak eval vocabulary into training). Persist the
+    returned vectorizer (it's picklable) and reuse it via vectorize_caption
+    for every other caption, train or eval, so they all share one
+    vocabulary. Generic across any text source - doesn't care whether the
+    captions are real free text or derived/generated strings."""
+    vectorizer = TfidfVectorizer()
+    vectorizer.fit(captions)
+    return vectorizer
+
+
+def vectorize_caption(vectorizer: TfidfVectorizer, caption: str) -> np.ndarray:
+    """Already-fitted vectorizer -> dense feature vector for one caption.
+    Never fits - just applies whatever vocabulary fit_caption_vectorizer
+    already learned."""
+    return vectorizer.transform([caption]).toarray()[0]
 
 
 # ── Layer 2: modality -> data-type mapping ───────────────────────────────────
@@ -76,9 +100,10 @@ MODALITY_DATA_TYPE = {
     "Pathology": "tabular",
     "X-Ray": "image",
     # MRI/CT would map to "image" too (same load_image, different files);
-    # Clinical Note would map to "text" (read the file, then bag_of_words);
-    # ECG would map to "tabular" or a new "signal" type. None implemented
-    # yet - see is_modality_supported().
+    # Clinical Note would map to "text" (read the file, then reuse
+    # fit_caption_vectorizer/vectorize_caption as-is); ECG would map to
+    # "tabular" or a new "signal" type. None implemented yet - see
+    # is_modality_supported().
 }
 
 DATA_TYPE_LOADERS = {
@@ -91,13 +116,29 @@ def is_modality_supported(modality_type: str) -> bool:
     return MODALITY_DATA_TYPE.get(modality_type) in DATA_TYPE_LOADERS
 
 
+def load_entry_vector(modality_type: str, local_path: str) -> np.ndarray:
+    """Single-modality dispatch - looks up the data type for modality_type
+    and calls the matching layer-1 loader. Used as-is by classification
+    (image-only or tabular-only). The multimodal (image+text) composition
+    for the regression task is orchestrated by train.py/evaluate.py
+    instead of living in here, because fitting the text vectorizer needs
+    the whole training corpus at once - it can't be done inside a
+    per-entry dispatch function like this one."""
+    data_type = MODALITY_DATA_TYPE.get(modality_type)
+    if data_type not in DATA_TYPE_LOADERS:
+        raise NotImplementedError(
+            f"modalityType={modality_type!r} has no training loader yet. "
+            f"Implemented: {sorted(m for m in MODALITY_DATA_TYPE if MODALITY_DATA_TYPE[m] in DATA_TYPE_LOADERS)}. "
+            f"All modalities: {ALL_MODALITIES}."
+        )
+    return DATA_TYPE_LOADERS[data_type](local_path)
+
+
 # ── Domain-specific: the one multimodal (image+text) task ───────────────────
 # Everything below is specific to the X-Ray ink-coverage regression toy
 # task (docs/data-pipeline.md §4) - built from the generic primitives above,
-# but the captioning logic itself is inherently domain logic, not something
-# a registry entry alone could express.
-
-XRAY_CAPTION_VOCAB = ["symmetric", "asymmetric"]
+# but the captioning/target logic itself is inherently domain logic, not
+# something a registry entry alone could express.
 
 
 def derive_xray_caption(pixels: np.ndarray, size: Tuple[int, int] = (8, 8)) -> str:
@@ -117,31 +158,10 @@ def derive_xray_caption(pixels: np.ndarray, size: Tuple[int, int] = (8, 8)) -> s
     )
 
 
-def xray_ink_coverage(local_path: str, size: Tuple[int, int] = (8, 8)) -> float:
+def xray_ink_coverage(pixels: np.ndarray) -> float:
     """Mean pixel intensity - the real, continuous regression target for the
-    multimodal toy task. Computed straight from the image at train/eval
-    time, not ingested or stored anywhere."""
-    return float(load_image(local_path, size).mean())
-
-
-# ── Dispatch ──────────────────────────────────────────────────────────────
-
-def load_entry_vector(modality_type: str, local_path: str, multimodal: bool = False) -> np.ndarray:
-    data_type = MODALITY_DATA_TYPE.get(modality_type)
-    if data_type not in DATA_TYPE_LOADERS:
-        raise NotImplementedError(
-            f"modalityType={modality_type!r} has no training loader yet. "
-            f"Implemented: {sorted(m for m in MODALITY_DATA_TYPE if MODALITY_DATA_TYPE[m] in DATA_TYPE_LOADERS)}. "
-            f"All modalities: {ALL_MODALITIES}."
-        )
-    base_vector = DATA_TYPE_LOADERS[data_type](local_path)
-    if not multimodal:
-        return base_vector
-    if data_type != "image":
-        raise NotImplementedError(
-            f"no multimodal (image+text) composition defined for modalityType={modality_type!r} "
-            f"(data_type={data_type!r}) - only image-shaped modalities have captioning logic today."
-        )
-    caption = derive_xray_caption(base_vector)
-    text_features = bag_of_words(caption, XRAY_CAPTION_VOCAB)
-    return np.concatenate([base_vector, text_features])
+    multimodal toy task. Takes an already-loaded pixel vector (callers in
+    the multimodal path already have pixels in hand for captioning too, so
+    this avoids loading the same image twice) - not ingested or stored
+    anywhere."""
+    return float(pixels.mean())

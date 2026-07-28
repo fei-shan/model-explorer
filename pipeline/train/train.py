@@ -16,7 +16,12 @@ signature, what "val accuracy" even means) that they're branched explicitly
 below rather than forced through one abstraction for two cases. Regression
 also has no discrete label to read from Firestore - its target
 (loaders.xray_ink_coverage) is computed straight from the downloaded image,
-identically at train and eval time.
+identically at train and eval time - and its text input (the caption) needs
+a two-pass load: derive every entry's caption first, THEN fit the TF-IDF
+vectorizer on the training split's captions, THEN vectorize every entry
+with that fitted vectorizer. That fit step can't happen per-entry, which is
+why this orchestration lives here instead of inside loaders.py's generic
+per-entry dispatch.
 
 Usage: python3 train.py --run-id <trainingRunId>
 """
@@ -33,7 +38,14 @@ from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, r2_sco
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from gcp_clients import artifacts_bucket, data_bucket, firestore_client, gcs_uri, parse_gcs_uri
-from loaders import load_entry_vector, xray_ink_coverage
+from loaders import (
+    derive_xray_caption,
+    fit_caption_vectorizer,
+    load_entry_vector,
+    load_image,
+    vectorize_caption,
+    xray_ink_coverage,
+)
 from models import build_model
 
 
@@ -66,14 +78,44 @@ def main(run_id: str):
     run_ref.update({"status": "running"})
 
     print("Downloading entry files and extracting features...")
-    vectors, targets, splits = [], [], []
+    targets, splits = [], []
+    vectorizer = None
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
-        for entry in entries:
-            local_path = download_entry_file(entry["imagePath"], tmp_path)
-            vectors.append(load_entry_vector(modality, str(local_path), multimodal=is_regression))
-            targets.append(xray_ink_coverage(str(local_path)) if is_regression else entry["diagnosis"])
-            splits.append(entry.get("split", "train"))
+
+        if is_regression:
+            # Pass 1: load pixels + derive captions/targets for every entry.
+            # Can't vectorize captions yet - the vectorizer needs the whole
+            # training-split corpus fit first.
+            pixel_vectors, captions = [], []
+            for entry in entries:
+                local_path = download_entry_file(entry["imagePath"], tmp_path)
+                pixels = load_image(str(local_path))
+                pixel_vectors.append(pixels)
+                captions.append(derive_xray_caption(pixels))
+                targets.append(xray_ink_coverage(pixels))
+                splits.append(entry.get("split", "train"))
+
+            splits_arr = np.array(splits)
+            train_mask = splits_arr == "train"
+
+            # Fit on the training captions only - fitting on val/eval
+            # captions too would leak their vocabulary into training.
+            vectorizer = fit_caption_vectorizer([c for c, is_train in zip(captions, train_mask) if is_train])
+
+            # Pass 2: now vectorize every caption with that fitted
+            # vectorizer and concatenate onto each entry's pixel vector.
+            vectors = [
+                np.concatenate([pixels, vectorize_caption(vectorizer, caption)])
+                for pixels, caption in zip(pixel_vectors, captions)
+            ]
+        else:
+            vectors = []
+            for entry in entries:
+                local_path = download_entry_file(entry["imagePath"], tmp_path)
+                vectors.append(load_entry_vector(modality, str(local_path)))
+                targets.append(entry["diagnosis"])
+                splits.append(entry.get("split", "train"))
 
     X = np.stack(vectors)
     splits_arr = np.array(splits)
@@ -140,7 +182,9 @@ def main(run_id: str):
     with tempfile.TemporaryDirectory() as tmpdir:
         local_path = Path(tmpdir) / "model.pkl"
         with open(local_path, "wb") as f:
-            pickle.dump({"model": model, "scaler": scaler, "label_encoder": label_encoder}, f)
+            pickle.dump(
+                {"model": model, "scaler": scaler, "label_encoder": label_encoder, "vectorizer": vectorizer}, f
+            )
         artifacts_bucket.blob(object_path).upload_from_filename(str(local_path))
     weights_uri = gcs_uri("artifacts", object_path)
 

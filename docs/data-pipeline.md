@@ -95,10 +95,18 @@ layers, deliberately kept separate:
 clinical modality they're loading:
 
 ```python
-def load_image(local_path, size=(8,8)) -> np.ndarray: ...   # any image file -> flattened [0,1] pixel vector
-def load_tabular(local_path) -> np.ndarray: ...              # any 'feature,value' CSV -> sorted feature vector
-def bag_of_words(text, vocab) -> np.ndarray: ...              # any text string -> presence vector against a fixed vocab
+def load_image(local_path, size=(8,8)) -> np.ndarray: ...        # any image file -> flattened [0,1] pixel vector
+def load_tabular(local_path) -> np.ndarray: ...                   # any 'feature,value' CSV -> sorted feature vector
+def fit_caption_vectorizer(captions: list) -> TfidfVectorizer: ... # fit once on a training corpus of caption strings
+def vectorize_caption(vectorizer, caption: str) -> np.ndarray: ... # transform one caption through an already-fitted vectorizer
 ```
+
+Text uses a **fitted** `TfidfVectorizer`, not a hand-picked fixed vocabulary
+— the vocabulary is learned from real training captions (`fit` once, on the
+training split only), then only ever `.transform()`'d at eval time, exactly
+the same fit-on-train/apply-everywhere pattern already used for
+`StandardScaler`. This generalizes to whatever text a project actually has,
+rather than working only for words someone anticipated in advance.
 
 `load_image` loads MRI, CT, X-Ray, or Pathology-as-images identically — same
 bytes in, same vector out. This is the reusable part; adding a new
@@ -143,54 +151,35 @@ their own logic later, not just a registry entry:
 
 - `derive_xray_caption(pixels)` turns real pixel statistics (stroke
   left-right symmetry) into a short natural-language string, built from
-  `load_image`'s output — then `bag_of_words()` (the same generic function
-  layer 1 exposes) vectorizes it and it's concatenated onto the 64-dim pixel
-  vector (66-dim total input). The captioning step is domain-specific; the
-  vectorizer it hands off to is not.
-- `xray_ink_coverage()` (mean pixel intensity) is the real, continuous
+  `load_image`'s output. The captioning step is domain-specific; the
+  vectorizer it hands off to (below) is not.
+- `xray_ink_coverage(pixels)` (mean pixel intensity) is the real, continuous
   regression target — deliberately a *different* derived quantity than what
   the caption describes (symmetry vs. density), so the caption is a
   genuinely separate signal rather than a bucketed restatement of the
   answer.
-- Feature extraction is identical at train and eval time (same function,
+- Feature extraction is identical at train and eval time (same functions,
   same image), so there's no train/eval skew risk despite nothing being
   persisted.
 
-`load_entry_vector(modality_type, local_path, multimodal=...)` is the single
-dispatch point: it looks up the data type for the modality, calls the
-matching layer-1 loader, and — only when `multimodal=True` and the data type
-is `"image"` — hands that loader's output to the captioning step. `train.py`
-requests `multimodal=True` by checking `ModelSpec.type == "regression"`, not
-`Dataset.modalities`, since it's the same `X-Ray` images either way, just a
-different feature representation for a different task.
-
-**A real numerical instability, found and fixed while building this**:
-`SGDRegressor`'s default `learning_rate='optimal'` schedule takes steps
-large enough, on this data scale (16 train samples, 66-dim input), to
-overfit within a handful of epochs regardless of regularization strength —
-and was observed to occasionally diverge to astronomical loss values at low
-`alpha`. Verified by direct hyperparameter sweep (not guesswork):
-`learning_rate='constant'` with a small `eta0` fixes the instability and
-gives an actually gradual, chart-worthy convergence curve. Even so, R² on
-the training loop's internal 4-sample validation split lands *negative*
-(around -1.1) — not a bug: those 4 samples' targets have a standard
-deviation of ~0.015 (they happen to be similarly inked digits), so R²'s
-variance-normalized denominator is tiny and even a small absolute error
-produces a harsh score. On the real, separately-ingested 10-sample held-out
-`ds-digits-eval` set, the same model scores R²=0.385, MAE=0.024 — MAE/RMSE
-are the more honest read of this model at this data scale, which is why
-both are reported alongside R² rather than R² alone.
-
-**A real frontend bug, found and fixed while wiring this up**: three places
-(`EvaluationDetailPage.tsx`, `EvalMetricsSummary.tsx`, `EntryResultTable.tsx`)
-computed prediction "failures" via exact string equality on
-`predictedLabel`/`trueLabel` — correct for classification, but a regression
-prediction essentially never exactly equals a continuous target, so every
-row would've shown as a failure regardless of model quality. Fixed with a
-shared `isEntryResultCorrect()` helper (`src/utils/entryResults.ts`) that
-uses a tolerance-based comparison for `regression` and exact match for
-everything else; `EvalMetricsSummary` also gained a dedicated `regression`
-branch (headline R²/RMSE instead of an undefined "accuracy").
+**Fitting the vectorizer needs the whole training corpus at once, which is
+why this composition is orchestrated by `train.py`/`evaluate.py` directly**
+rather than living inside `loaders.py`'s generic per-entry
+`load_entry_vector` dispatch (that function handles only the single-modality
+case now, used as-is by classification). `train.py`'s regression path runs
+two passes: (1) download every entry, load its pixels, derive its caption,
+compute its target — collecting captions and pixel vectors without combining
+them yet; (2) fit `TfidfVectorizer` on *only the training-split* captions,
+then `vectorize_caption()` every entry's caption (train **and** val) through
+that one fitted vectorizer before concatenating each onto its pixel vector.
+The fitted vectorizer is pickled alongside the model/scaler (a fourth field
+in the same dict) so `evaluate.py` can `vectorize_caption()` held-out
+captions against the exact training vocabulary — never refitting on eval
+data, which would leak eval vocabulary into the featurization. `train.py`
+decides to run this multimodal path at all by checking
+`ModelSpec.type == "regression"`, not `Dataset.modalities`, since it's the
+same `X-Ray` images either way, just a different feature representation for
+a different task.
 
 ---
 
