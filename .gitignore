@@ -4,6 +4,7 @@ dist/
 dist-ssr/
 *.local
 .vite/
+*.tsbuildinfo
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
